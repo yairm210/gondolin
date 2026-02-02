@@ -13,7 +13,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var virtio = try std.fs.openFileAbsolute("/dev/vport0p0", .{ .mode = .read_write });
+    var virtio = try openVirtioPort();
     defer virtio.close();
     const virtio_fd: std.posix.fd_t = virtio.handle;
 
@@ -39,6 +39,24 @@ pub fn main() !void {
             log.err("exec handling failed: {s}", .{@errorName(err)});
             _ = protocol.sendError(allocator, virtio_fd, req.id, "exec_failed", "failed to execute") catch {};
         };
+    }
+}
+
+fn openVirtioPort() !std.fs.File {
+    const paths = [_][]const u8{
+        "/dev/vport0p0",
+        "/dev/virtio-ports/virtio-port",
+    };
+
+    while (true) {
+        for (paths) |path| {
+            const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            return file;
+        }
+        std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
     }
 }
 

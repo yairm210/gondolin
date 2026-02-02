@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+mkdir -p /dev/pts /dev/shm /run
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /run
+
+echo "[init] starting sandboxd" > /dev/console
+
+exec /usr/bin/sandboxd
