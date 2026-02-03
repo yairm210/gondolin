@@ -4,11 +4,13 @@
   "type": "commonjs",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/exec.js",
-    "dev": "tsx src/exec.ts",
-    "dev:ws": "tsx src/ws-server.ts",
-    "test:ws": "tsx src/ws-test.ts",
-    "bash": "tsx src/bash.ts"
+    "start": "node dist/bin/eregion.js exec",
+    "dev": "tsx bin/eregion.ts exec",
+    "dev:ws": "tsx bin/eregion.ts ws-server",
+    "test": "tsx --test test/ws.test.ts",
+    "test:ws": "tsx --test test/ws.test.ts",
+    "bash": "tsx bin/eregion.ts bash",
+    "eregion": "tsx bin/eregion.ts"
   },
   "dependencies": {
     "cbor": "^10.0.4",

@@ -1,4 +1,4 @@
-import { VM, ExecStream } from "./vm";
+import { VM, ExecStream } from "../src/vm";
 
 const WS_URL = process.env.WS_URL;
 const TOKEN = process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN;
@@ -48,7 +48,7 @@ async function shutdown(vm: VM) {
   process.exit(exitCode);
 }
 
-async function main() {
+export async function runBash() {
   const vm = new VM({ url: WS_URL ?? undefined, token: TOKEN ?? undefined });
 
   try {
@@ -83,7 +83,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  runBash().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}

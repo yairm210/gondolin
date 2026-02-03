@@ -14,7 +14,7 @@ format:
 	@echo "No formatter configured for host"
 
 test:
-	@$(PNPM) run test:ws
+	@$(PNPM) run test
 
 clean:
 	@rm -rf dist

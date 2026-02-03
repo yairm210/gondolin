@@ -6,7 +6,7 @@ import {
   decodeMessage,
   encodeFrame,
   IncomingMessage,
-} from "./virtio-protocol";
+} from "../src/virtio-protocol";
 
 type Command = {
   cmd: string;
@@ -128,14 +128,13 @@ function parseArgs(argv: string[]): Args {
 
 function usage() {
   console.log("Usage:");
-  console.log("  node dist/exec.js --sock PATH -- CMD [ARGS...]");
+  console.log("  eregion exec --sock PATH -- CMD [ARGS...]");
   console.log(
-    "  node dist/exec.js --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]"
+    "  eregion exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]"
   );
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
 }
-
 
 function buildCommandPayload(command: Command) {
   const payload: { cmd: string; argv?: string[]; env?: string[]; cwd?: string } = {
@@ -149,8 +148,8 @@ function buildCommandPayload(command: Command) {
   return payload;
 }
 
-function main() {
-  const args = parseArgs(process.argv.slice(2));
+export function runExec(argv: string[] = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   if (!args.sock || args.commands.length === 0) {
     usage();
     process.exit(1);
@@ -232,4 +231,6 @@ function main() {
   });
 }
 
-main();
+if (require.main === module) {
+  runExec();
+}

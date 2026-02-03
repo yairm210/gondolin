@@ -2,7 +2,7 @@ import {
   SandboxWsServer,
   SandboxWsServerOptions,
   resolveSandboxWsServerOptions,
-} from "./sandbox-ws-server";
+} from "../src/sandbox-ws-server";
 
 function parseArgs(argv: string[]): SandboxWsServerOptions {
   const args: SandboxWsServerOptions = {};
@@ -89,20 +89,18 @@ function parseArgs(argv: string[]): SandboxWsServerOptions {
 
 function usage() {
   const defaults = resolveSandboxWsServerOptions();
-  console.log("Usage: node dist/ws-server.js [options]");
+  console.log("Usage: eregion ws-server [options]");
   console.log("Options:");
   console.log(`  --host HOST          Host to bind (default ${defaults.host})`);
   console.log(`  --port PORT          Port to bind (default ${defaults.port})`);
-  console.log(
-    `  --qemu PATH          QEMU binary (default ${defaults.qemuPath})`
-  );
+  console.log(`  --qemu PATH          QEMU binary (default ${defaults.qemuPath})`);
   console.log("  --kernel PATH        Kernel path");
   console.log("  --initrd PATH        Initrd path");
   console.log(`  --memory SIZE        Memory size (default ${defaults.memory})`);
   console.log(`  --cpus N             vCPU count (default ${defaults.cpus})`);
   console.log("  --virtio-sock PATH   Virtio serial socket path");
   console.log("  --net-sock PATH      QEMU net socket path");
-  console.log(`  --net-mac MAC        MAC address for virtio-net`);
+  console.log("  --net-mac MAC        MAC address for virtio-net");
   console.log("  --no-net             Disable QEMU net backend");
   console.log("  --net-debug          Enable net backend debug logging");
   console.log("  --machine TYPE       Override QEMU machine type");
@@ -118,8 +116,8 @@ function formatLog(message: string) {
   return `${message}\n`;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function runWsServer(argv: string[] = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   const server = new SandboxWsServer(args);
 
   server.on("log", (message: string) => {
@@ -148,4 +146,9 @@ async function main() {
   });
 }
 
-main();
+if (require.main === module) {
+  runWsServer().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}

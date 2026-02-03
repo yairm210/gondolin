@@ -11,8 +11,8 @@ requests.
   - `guest/image/` builds an Alpine minirootfs + init script into an initramfs.
   - `guest/Makefile` provides `build`, `image`, `kernel`, and `qemu` targets.
 - `host/` — TypeScript host controller + WebSocket server.
-  - `host/src/ws-server.ts` manages QEMU lifecycle and bridges WebSocket exec requests to virtio-serial.
-  - `host/src/exec.ts` is a CLI for sending exec requests directly over the virtio socket.
+  - `host/src/sandbox-ws-server.ts` manages QEMU lifecycle and bridges WebSocket exec requests to virtio-serial.
+  - `host/bin/eregion.ts` is the CLI (exec + ws-server subcommands).
   - `host/src/virtio-protocol.ts` and `host/src/ws-protocol.ts` define encoding/framing.
   - `host/WS_PROTOCOL.md` documents the WebSocket protocol.
 - `plans/` — POC planning docs.
@@ -31,9 +31,9 @@ requests.
   - `guest/image/init` mounts `/proc`, `/sys`, `/dev`, loads virtio modules, brings up `eth0`, and runs DHCP.
   - `guest/image/out/` contains the generated initramfs and downloaded kernel artifacts.
 - **Host controller**
-  - `host/src/ws-server.ts` starts QEMU, exposes a WebSocket API, and bridges exec messages to virtio.
+  - `host/src/sandbox-ws-server.ts` starts QEMU, exposes a WebSocket API, and bridges exec messages to virtio.
   - Automatic restart logic and state notifications are implemented in `SandboxController`.
-  - `host/src/exec.ts` can send direct exec requests over the virtio socket for quick testing.
+  - `host/bin/eregion.ts exec` can send direct exec requests over the virtio socket for quick testing.
 - **Host networking (new)**
   - QEMU is launched with a virtio-net device backed by a host Unix socket.
   - A TypeScript network stack (`host/src/network-stack.ts`) handles Ethernet/ARP/IPv4/TCP/UDP/DHCP.
