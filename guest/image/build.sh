@@ -183,7 +183,7 @@ install -m 0755 "${IMAGE_DIR}/init" "${ROOTFS_DIR}/init"
 
 if [[ -n "${MITM_CA_CERT:-}" && -f "${MITM_CA_CERT}" ]]; then
     install -d "${ROOTFS_DIR}/usr/local/share/ca-certificates"
-    install -m 0644 "${MITM_CA_CERT}" "${ROOTFS_DIR}/usr/local/share/ca-certificates/eregion-mitm-ca.crt"
+    install -m 0644 "${MITM_CA_CERT}" "${ROOTFS_DIR}/usr/local/share/ca-certificates/gondolin-mitm-ca.crt"
 
     if [[ -f "${ROOTFS_DIR}/etc/ssl/certs/ca-certificates.crt" ]]; then
         cat "${MITM_CA_CERT}" >> "${ROOTFS_DIR}/etc/ssl/certs/ca-certificates.crt"

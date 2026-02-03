@@ -3,13 +3,13 @@ import { runExec } from "./exec";
 import { runWsServer } from "./ws-server";
 
 function usage() {
-  console.log("Usage: eregion <command> [options]");
+  console.log("Usage: gondolin <command> [options]");
   console.log("Commands:");
   console.log("  exec         Run a command via the virtio socket");
   console.log("  ws-server    Start the WebSocket bridge server");
   console.log("  bash         Start an interactive bash session over WS");
   console.log("  help         Show this help");
-  console.log("\nRun eregion <command> --help for command-specific flags.");
+  console.log("\nRun gondolin <command> --help for command-specific flags.");
 }
 
 async function main() {

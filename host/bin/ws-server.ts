@@ -89,7 +89,7 @@ function parseArgs(argv: string[]): SandboxWsServerOptions {
 
 function usage() {
   const defaults = resolveSandboxWsServerOptions();
-  console.log("Usage: eregion ws-server [options]");
+  console.log("Usage: gondolin ws-server [options]");
   console.log("Options:");
   console.log(`  --host HOST          Host to bind (default ${defaults.host})`);
   console.log(`  --port PORT          Port to bind (default ${defaults.port})`);

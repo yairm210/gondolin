@@ -1,4 +1,4 @@
-# Eregion Sandbox
+# Gondolin Sandbox
 
 This repo implements a proof-of-concept for the agent sandbox.  It focuses on a
 QEMU-based micro-VM with a tiny guest supervisor, a virtio-serial RPC, and a

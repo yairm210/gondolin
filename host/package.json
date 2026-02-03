@@ -1,16 +1,16 @@
 {
-  "name": "eregion-host",
+  "name": "gondolin-host",
   "private": true,
   "type": "commonjs",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/bin/eregion.js exec",
-    "dev": "tsx bin/eregion.ts exec",
-    "dev:ws": "tsx bin/eregion.ts ws-server",
+    "start": "node dist/bin/gondolin.js exec",
+    "dev": "tsx bin/gondolin.ts exec",
+    "dev:ws": "tsx bin/gondolin.ts ws-server",
     "test": "tsx --test test/ws.test.ts",
     "test:ws": "tsx --test test/ws.test.ts",
-    "bash": "tsx bin/eregion.ts bash",
-    "eregion": "tsx bin/eregion.ts"
+    "bash": "tsx bin/gondolin.ts bash",
+    "gondolin": "tsx bin/gondolin.ts"
   },
   "dependencies": {
     "cbor": "^10.0.4",

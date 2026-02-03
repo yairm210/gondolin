@@ -801,7 +801,7 @@ export class QemuNetworkBackend extends EventEmitter {
         "3650",
         "-nodes",
         "-subj",
-        "/CN=eregion-mitm-ca",
+        "/CN=gondolin-mitm-ca",
         "-keyout",
         caKeyPath,
         "-out",

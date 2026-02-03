@@ -128,9 +128,9 @@ function parseArgs(argv: string[]): Args {
 
 function usage() {
   console.log("Usage:");
-  console.log("  eregion exec --sock PATH -- CMD [ARGS...]");
+  console.log("  gondolin exec --sock PATH -- CMD [ARGS...]");
   console.log(
-    "  eregion exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]"
+    "  gondolin exec --sock PATH --cmd CMD [--arg ARG] [--env KEY=VALUE] [--cwd PATH] [--cmd CMD ...]"
   );
   console.log("Use -- to pass a command and its arguments directly.");
   console.log("Arguments apply to the most recent --cmd.");
