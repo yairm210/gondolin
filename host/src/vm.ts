@@ -133,6 +133,12 @@ export class VM {
     }
 
     const serverOptions: SandboxWsServerOptions = { ...options.server };
+    if (serverOptions.vfsProvider && options.vfs) {
+      throw new Error("VM cannot specify both vfs and server.vfsProvider");
+    }
+    if (serverOptions.vfsProvider) {
+      this.vfs = serverOptions.vfsProvider;
+    }
     if (options.fetch && serverOptions.fetch === undefined) {
       serverOptions.fetch = options.fetch;
     }
