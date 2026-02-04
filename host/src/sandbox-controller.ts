@@ -64,6 +64,12 @@ export class SandboxController extends EventEmitter {
       this.setState("running");
     });
 
+    this.child.on("error", (err) => {
+      this.child = null;
+      this.setState("stopped");
+      this.emit("exit", { code: null, signal: null, error: err });
+    });
+
     this.child.on("exit", (code, signal) => {
       this.child = null;
       this.setState("stopped");
