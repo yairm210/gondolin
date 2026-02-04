@@ -30,12 +30,18 @@ async function runTest(vm: VM, label: string, payload: Buffer) {
     `cat > ${guestPath} && chmod +x ${guestPath} && ${guestPath}`,
   ];
 
-  const exec = await vm.execStream(command, {
-    stdin: payload,
-    stdout: (chunk) => process.stdout.write(chunk),
-    stderr: (chunk) => process.stderr.write(chunk),
-  });
-  const result = await exec.result;
+  const proc = vm.exec(command, { stdin: payload });
+
+  // Stream output as it arrives
+  for await (const chunk of proc.output()) {
+    if (chunk.stream === "stdout") {
+      process.stdout.write(chunk.data);
+    } else {
+      process.stderr.write(chunk.data);
+    }
+  }
+
+  const result = await proc;
   if (result.exitCode !== 0) {
     throw new Error(`guest ${label} tests failed with exit code ${result.exitCode}`);
   }

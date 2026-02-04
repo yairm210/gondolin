@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import type { RawData } from "ws";
-import { PassThrough, Readable } from "stream";
+import { Readable } from "stream";
 
 import {
   ErrorMessage,
@@ -25,6 +25,15 @@ import {
   normalizeMountMap,
   normalizeMountPath,
 } from "./vfs/mounts";
+import {
+  ExecProcess,
+  ExecResult,
+  ExecOptions,
+  ExecSession,
+  createExecSession,
+  finishExecSession,
+  rejectExecSession,
+} from "./exec";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
@@ -39,38 +48,6 @@ function formatLog(message: string) {
 type ExecInput = string | string[];
 
 type ExecStdin = boolean | string | Buffer | Readable | AsyncIterable<Buffer>;
-
-export type ExecOptions = {
-  argv?: string[];
-  env?: string[];
-  cwd?: string;
-  stdin?: ExecStdin;
-  pty?: boolean;
-  stdout?: (chunk: Buffer) => void;
-  stderr?: (chunk: Buffer) => void;
-  signal?: AbortSignal;
-};
-
-export type ExecStreamOptions = ExecOptions & {
-  buffer?: boolean;
-};
-
-export type ExecResult = {
-  id: number;
-  exitCode: number;
-  signal?: number;
-  stdout: Buffer;
-  stderr: Buffer;
-};
-
-export type ExecStream = {
-  id: number;
-  stdout: Readable;
-  stderr: Readable;
-  sendStdin: (data: Buffer | string) => Promise<void>;
-  endStdin: () => Promise<void>;
-  result: Promise<ExecResult>;
-};
 
 export type VmVfsOptions = {
   mounts?: Record<string, VirtualProvider>;
@@ -89,22 +66,24 @@ export type VMOptions = {
   vfs?: VmVfsOptions | null;
 };
 
-type ExecSession = {
-  id: number;
-  stdout: PassThrough;
-  stderr: PassThrough;
-  bufferOutput: boolean;
-  stdoutChunks: Buffer[];
-  stderrChunks: Buffer[];
-  resolve: (result: ExecResult) => void;
-  reject: (error: Error) => void;
-  result: Promise<ExecResult>;
-  stdinEnabled: boolean;
-  stdoutCallback?: (chunk: Buffer) => void;
-  stderrCallback?: (chunk: Buffer) => void;
+export type ShellOptions = {
+  /** Command to run (default: bash) */
+  command?: string | string[];
+  /** Environment variables */
+  env?: string[];
+  /** Working directory */
+  cwd?: string;
+  /** Abort signal */
   signal?: AbortSignal;
-  signalListener?: () => void;
+  /** 
+   * Auto-attach to process stdin/stdout/stderr.
+   * Default: true when running in a TTY
+   */
+  attach?: boolean;
 };
+
+// Re-export types from exec.ts
+export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 
 export class VM {
   private readonly token?: string;
@@ -246,85 +225,166 @@ export class VM {
     await this.ensureVfsReady();
   }
 
-  async exec(command: ExecInput, options: ExecOptions = {}): Promise<ExecResult> {
-    const stream = await this.execStream(command, { ...options, buffer: true });
-    return stream.result;
+  /**
+   * Execute a command in the sandbox.
+   * 
+   * Returns an ExecProcess which can be:
+   * - awaited for a buffered result with strings
+   * - iterated for streaming output
+   * - used with stdin via write()/end()
+   * 
+   * @example
+   * ```typescript
+   * // Simple command - await for result
+   * const result = await vm.exec(['echo', 'hello']);
+   * console.log(result.stdout); // 'hello\n'
+   * 
+   * // Streaming output
+   * for await (const line of vm.exec(['tail', '-f', '/var/log/syslog'])) {
+   *   console.log(line);
+   * }
+   * 
+   * // Interactive with stdin
+   * const proc = vm.exec(['cat'], { stdin: true });
+   * proc.write('hello\n');
+   * proc.end();
+   * const result = await proc;
+   * ```
+   */
+  exec(command: ExecInput, options: ExecOptions = {}): ExecProcess {
+    const proc = this.execInternal(command, options);
+    return proc;
   }
 
-  async execStream(
-    command: ExecInput,
-    options: ExecStreamOptions = {}
-  ): Promise<ExecStream> {
-    await this.start();
-    await this.ensureVfsReady();
-    return this.execStreamInternal(command, options);
+  /**
+   * Start an interactive shell session.
+   * 
+   * By default, attaches to process.stdin/stdout/stderr when running in a TTY.
+   * 
+   * @example
+   * ```typescript
+   * // Simple interactive shell
+   * const result = await vm.shell();
+   * process.exit(result.exitCode);
+   * 
+   * // Custom command
+   * const result = await vm.shell({ command: 'python3' });
+   * 
+   * // Manual control
+   * const proc = vm.shell({ attach: false });
+   * proc.write('ls\n');
+   * for await (const chunk of proc) {
+   *   process.stdout.write(chunk);
+   * }
+   * ```
+   */
+  shell(options: ShellOptions = {}): ExecProcess {
+    const command = options.command ?? ["bash", "-i"];
+    const shouldAttach = options.attach ?? process.stdin.isTTY;
+
+    // Build TERM environment variable
+    const env = [...(options.env ?? [])];
+    const hasTermEnv = env.some((e) => e.startsWith("TERM="));
+    if (!hasTermEnv) {
+      const term = process.env.TERM;
+      if (!term || term === "xterm-ghostty") {
+        env.push("TERM=xterm-256color");
+      } else {
+        env.push(`TERM=${term}`);
+      }
+    }
+
+    const proc = this.exec(command, {
+      env,
+      cwd: options.cwd,
+      stdin: true,
+      pty: true,
+      signal: options.signal,
+    });
+
+    if (shouldAttach) {
+      proc.attach(
+        process.stdin as NodeJS.ReadStream,
+        process.stdout as NodeJS.WriteStream,
+        process.stderr as NodeJS.WriteStream
+      );
+    }
+
+    return proc;
   }
 
-  private async execStreamInternal(
-    command: ExecInput,
-    options: ExecStreamOptions = {}
-  ): Promise<ExecStream> {
+  private execInternal(command: ExecInput, options: ExecOptions): ExecProcess {
     const { cmd, argv } = normalizeCommand(command, options);
     const id = this.allocateId();
 
     const stdinSetting = options.stdin;
     const stdinEnabled = stdinSetting !== undefined && stdinSetting !== false;
 
-    const session = this.createSession(id, {
-      bufferOutput: options.buffer ?? false,
+    const session = createExecSession(id, {
       stdinEnabled,
-      stdout: options.stdout,
-      stderr: options.stderr,
+      encoding: options.encoding,
       signal: options.signal,
     });
 
+    // Setup abort handling
+    if (options.signal) {
+      const onAbort = () => {
+        rejectExecSession(session, new Error("exec aborted"));
+        this.sessions.delete(id);
+      };
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      session.signalListener = onAbort;
+    }
+
     this.sessions.set(id, session);
 
-    const message = {
-      type: "exec" as const,
-      id,
-      cmd,
-      argv: argv.length ? argv : undefined,
-      env: options.env && options.env.length ? options.env : undefined,
-      cwd: options.cwd,
-      stdin: stdinEnabled ? true : undefined,
-      pty: options.pty ? true : undefined,
-    };
+    // Create the process handle
+    const proc = new ExecProcess(session, {
+      sendStdin: (id, data) => this.sendStdinData(id, data),
+      sendStdinEof: (id) => this.sendStdinEof(id),
+      cleanup: (id) => this.sessions.delete(id),
+    });
 
-    try {
-      this.sendJson(message);
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.rejectSession(session, error);
-      throw error;
-    }
+    // Start the command asynchronously
+    this.startExec(id, cmd, argv, options, session, stdinSetting);
 
-    if (stdinEnabled && stdinSetting !== true) {
-      void this.pipeStdin(id, stdinSetting ?? "", session);
-    }
-
-    return {
-      id,
-      stdout: session.stdout,
-      stderr: session.stderr,
-      sendStdin: async (data: Buffer | string) => {
-        this.ensureStdinAllowed(id);
-        this.sendStdinData(id, data);
-      },
-      endStdin: async () => {
-        this.ensureStdinAllowed(id);
-        this.sendStdinEof(id);
-      },
-      result: session.result,
-    };
+    return proc;
   }
 
-  private async execInternal(
-    command: ExecInput,
-    options: ExecStreamOptions = {}
-  ): Promise<ExecResult> {
-    const stream = await this.execStreamInternal(command, { ...options, buffer: true });
-    return stream.result;
+  private async startExec(
+    id: number,
+    cmd: string,
+    argv: string[],
+    options: ExecOptions,
+    session: ExecSession,
+    stdinSetting: ExecStdin | undefined
+  ) {
+    try {
+      await this.start();
+      await this.ensureVfsReady();
+
+      const message = {
+        type: "exec" as const,
+        id,
+        cmd,
+        argv: argv.length ? argv : undefined,
+        env: options.env && options.env.length ? options.env : undefined,
+        cwd: options.cwd,
+        stdin: session.stdinEnabled ? true : undefined,
+        pty: options.pty ? true : undefined,
+      };
+
+      this.sendJson(message);
+
+      // Pipe stdin if provided (and not just `true`)
+      if (session.stdinEnabled && stdinSetting !== true && stdinSetting !== undefined) {
+        void this.pipeStdin(id, stdinSetting, session);
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      rejectExecSession(session, error);
+      this.sessions.delete(id);
+    }
   }
 
   private async startInternal() {
@@ -359,79 +419,27 @@ export class VM {
     throw new Error("no available request ids");
   }
 
-  private createSession(
-    id: number,
-    options: {
-      bufferOutput: boolean;
-      stdinEnabled: boolean;
-      stdout?: (chunk: Buffer) => void;
-      stderr?: (chunk: Buffer) => void;
-      signal?: AbortSignal;
-    }
-  ): ExecSession {
-    let resolve!: (result: ExecResult) => void;
-    let reject!: (error: Error) => void;
-    const result = new Promise<ExecResult>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-
-    const session: ExecSession = {
-      id,
-      stdout: new PassThrough(),
-      stderr: new PassThrough(),
-      bufferOutput: options.bufferOutput,
-      stdoutChunks: [],
-      stderrChunks: [],
-      resolve,
-      reject,
-      result,
-      stdinEnabled: options.stdinEnabled,
-      stdoutCallback: options.stdout,
-      stderrCallback: options.stderr,
-      signal: options.signal,
-    };
-
-    if (options.signal) {
-      const onAbort = () => {
-        this.rejectSession(session, new Error("exec aborted"));
-      };
-      options.signal.addEventListener("abort", onAbort, { once: true });
-      session.signalListener = onAbort;
-    }
-
-    return session;
-  }
-
-  private ensureStdinAllowed(id: number) {
-    const session = this.sessions.get(id);
-    if (!session) {
-      throw new Error(`stdin is not available for request ${id}`);
-    }
-    if (!session.stdinEnabled) {
-      throw new Error(`stdin was not enabled for request ${id}`);
-    }
-  }
-
   private async pipeStdin(id: number, input: ExecStdin, session: ExecSession) {
     if (!session.stdinEnabled) return;
     try {
       if (typeof input === "string" || Buffer.isBuffer(input)) {
         this.sendStdinData(id, input);
+        this.sendStdinEof(id);
       } else if (typeof input === "boolean") {
-        // no-op
+        // no-op for `true`
       } else {
         for await (const chunk of toAsyncIterable(input)) {
           if (!this.sessions.has(id)) return;
           this.sendStdinData(id, chunk);
         }
-      }
-      if (this.sessions.has(id)) {
-        this.sendStdinEof(id);
+        if (this.sessions.has(id)) {
+          this.sendStdinEof(id);
+        }
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      this.rejectSession(session, error);
+      rejectExecSession(session, error);
+      this.sessions.delete(id);
     }
   }
 
@@ -574,14 +582,42 @@ export class VM {
       ? `grep -q " $1 ${fsType} " /proc/mounts`
       : `grep -q " $1 " /proc/mounts`;
     const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do ${mountCheck} && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
-    const result = await this.execInternal(["sh", "-c", script, "sh", mountPoint]);
+    
+    // Use internal exec that bypasses VFS check
+    const result = await this.execInternalNoVfsWait(["sh", "-c", script, "sh", mountPoint]);
     if (result.exitCode !== 0) {
       throw new Error(
-        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr
-          .toString()
-          .trim()}`
+        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.trim()}`
       );
     }
+  }
+
+  private async execInternalNoVfsWait(command: ExecInput): Promise<ExecResult> {
+    const { cmd, argv } = normalizeCommand(command, {});
+    const id = this.allocateId();
+
+    const session = createExecSession(id, {
+      stdinEnabled: false,
+    });
+
+    this.sessions.set(id, session);
+
+    const message = {
+      type: "exec" as const,
+      id,
+      cmd,
+      argv: argv.length ? argv : undefined,
+    };
+
+    try {
+      this.sendJson(message);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.sessions.delete(id);
+      rejectExecSession(session, error);
+    }
+
+    return session.resultPromise;
   }
 
   private async waitForStatus(): Promise<SandboxState> {
@@ -606,13 +642,15 @@ export class VM {
       const session = this.sessions.get(frame.id);
       if (!session) return;
       if (frame.stream === "stdout") {
+        if (!session.iterating) {
+          session.stdoutChunks.push(frame.data);
+        }
         session.stdout.write(frame.data);
-        if (session.bufferOutput) session.stdoutChunks.push(frame.data);
-        session.stdoutCallback?.(frame.data);
       } else {
+        if (!session.iterating) {
+          session.stderrChunks.push(frame.data);
+        }
         session.stderr.write(frame.data);
-        if (session.bufferOutput) session.stderrChunks.push(frame.data);
-        session.stderrCallback?.(frame.data);
       }
       return;
     }
@@ -665,14 +703,8 @@ export class VM {
   private handleExecResponse(message: ExecResponseMessage) {
     const session = this.sessions.get(message.id);
     if (!session) return;
-    const result: ExecResult = {
-      id: message.id,
-      exitCode: message.exit_code ?? 1,
-      signal: message.signal,
-      stdout: session.bufferOutput ? Buffer.concat(session.stdoutChunks) : Buffer.alloc(0),
-      stderr: session.bufferOutput ? Buffer.concat(session.stderrChunks) : Buffer.alloc(0),
-    };
-    this.finishSession(session, result);
+    this.sessions.delete(message.id);
+    finishExecSession(session, message.exit_code ?? 1, message.signal);
   }
 
   private handleError(message: ErrorMessage) {
@@ -683,33 +715,14 @@ export class VM {
     }
     const session = this.sessions.get(message.id);
     if (session) {
-      this.rejectSession(session, error);
+      this.sessions.delete(message.id);
+      rejectExecSession(session, error);
     }
-  }
-
-  private finishSession(session: ExecSession, result: ExecResult) {
-    this.sessions.delete(session.id);
-    session.stdout.end();
-    session.stderr.end();
-    if (session.signal && session.signalListener) {
-      session.signal.removeEventListener("abort", session.signalListener);
-    }
-    session.resolve(result);
-  }
-
-  private rejectSession(session: ExecSession, error: Error) {
-    this.sessions.delete(session.id);
-    session.stdout.end();
-    session.stderr.end();
-    if (session.signal && session.signalListener) {
-      session.signal.removeEventListener("abort", session.signalListener);
-    }
-    session.reject(error);
   }
 
   private rejectAll(error: Error) {
     for (const session of this.sessions.values()) {
-      this.rejectSession(session, error);
+      rejectExecSession(session, error);
     }
     this.sessions.clear();
   }

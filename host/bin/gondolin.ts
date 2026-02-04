@@ -1,6 +1,6 @@
 import net from "net";
 
-import { VM, ExecStream } from "../src/vm";
+import { VM } from "../src/vm";
 import {
   FrameReader,
   buildExecRequest,
@@ -12,10 +12,6 @@ import { runWsServer } from "./ws-server";
 
 const WS_URL = process.env.WS_URL;
 const TOKEN = process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN;
-const MAX_CHUNK = 32 * 1024;
-
-let shuttingDown = false;
-let bashExitCode = 1;
 
 type Command = {
   cmd: string;
@@ -250,84 +246,24 @@ function runExec(argv: string[] = process.argv.slice(2)) {
   });
 }
 
-function buildEnv() {
-  const env: string[] = [];
-  const term = process.env.TERM;
-  if (!term || term === "xterm-ghostty") {
-    env.push("TERM=xterm-256color");
-  } else {
-    env.push(`TERM=${term}`);
-  }
-  return env;
-}
-
-function wireStdin(exec: ExecStream) {
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-  }
-  process.stdin.resume();
-
-  process.stdin.on("data", (chunk: Buffer) => {
-    if (shuttingDown) return;
-    for (let offset = 0; offset < chunk.length; offset += MAX_CHUNK) {
-      const slice = chunk.subarray(offset, offset + MAX_CHUNK);
-      void exec.sendStdin(slice);
-    }
-  });
-
-  process.stdin.on("end", () => {
-    if (shuttingDown) return;
-    void exec.endStdin();
-  });
-}
-
-function cleanupBash() {
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(false);
-  }
-  process.stdin.pause();
-}
-
-async function shutdownBash(vm: VM) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  cleanupBash();
-  await vm.stop();
-  process.exit(bashExitCode);
-}
-
 async function runBash() {
   const vm = new VM({ url: WS_URL ?? undefined, token: TOKEN ?? undefined });
 
   try {
-    const exec = await vm.execStream(["bash", "-i"], {
-      env: buildEnv(),
-      stdin: true,
-      pty: true,
-      buffer: false,
-    });
+    // shell() automatically attaches to stdin/stdout/stderr in TTY mode
+    const result = await vm.shell();
 
-    exec.stdout.on("data", (chunk) => {
-      process.stdout.write(chunk);
-    });
-
-    exec.stderr.on("data", (chunk) => {
-      process.stderr.write(chunk);
-    });
-
-    wireStdin(exec);
-
-    const result = await exec.result;
-    bashExitCode = result.exitCode ?? 1;
     if (result.signal !== undefined) {
       process.stderr.write(`process exited due to signal ${result.signal}\n`);
     }
+
+    await vm.stop();
+    process.exit(result.exitCode);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`${message}\n`);
-    bashExitCode = 1;
-  } finally {
-    await shutdownBash(vm);
+    await vm.stop();
+    process.exit(1);
   }
 }
 

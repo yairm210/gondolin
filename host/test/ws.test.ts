@@ -58,8 +58,9 @@ test("ws http/https fetch", { timeout: timeoutMs }, async () => {
       timeoutMs
     );
 
-    const output = result.stdout.toString();
-    const stderr = result.stderr.toString();
+    // stdout/stderr are now strings
+    const output = result.stdout;
+    const stderr = result.stderr;
 
     assert.equal(
       result.exitCode,
@@ -113,8 +114,9 @@ test("ws fetch hook blocks requests", { timeout: timeoutMs, skip: Boolean(url) }
       timeoutMs
     );
 
-    const output = result.stdout.toString().trim().split("\n");
-    const stderr = result.stderr.toString();
+    // stdout/stderr are now strings
+    const output = result.stdout.trim().split("\n");
+    const stderr = result.stderr;
 
     assert.equal(
       result.exitCode,
@@ -176,8 +178,9 @@ test("ws isAllowed blocks private ipv4", { timeout: timeoutMs, skip: Boolean(url
 
     const result = await withTimeout(vm.exec(["python3", "-c", script]), timeoutMs);
 
-    const output = result.stdout.toString().trim().split("\n");
-    const stderr = result.stderr.toString();
+    // stdout/stderr are now strings
+    const output = result.stdout.trim().split("\n");
+    const stderr = result.stderr;
 
     assert.equal(
       result.exitCode,
@@ -194,6 +197,63 @@ test("ws isAllowed blocks private ipv4", { timeout: timeoutMs, skip: Boolean(url
     assert.equal(output[privateIndex + 1], "HTTP 403");
     assert.ok(seenIps.includes("192.168.127.1"), `missing 192.168.127.1 in isAllowed: ${seenIps.join(", ")}`);
     assert.ok(seenIps.includes("10.0.0.1"), `missing 10.0.0.1 in isAllowed: ${seenIps.join(", ")}`);
+  } finally {
+    await vm.stop();
+  }
+});
+
+test("exec result helpers", { timeout: timeoutMs }, async () => {
+  const vm = new VM({ url: url ?? undefined, token: token ?? undefined });
+
+  try {
+    // Test .lines() helper
+    const lsResult = await vm.exec(["sh", "-c", "echo -e 'one\\ntwo\\nthree'"]);
+    const lines = lsResult.lines();
+    assert.deepEqual(lines, ["one", "two", "three"]);
+
+    // Test .json() helper
+    const jsonResult = await vm.exec(["sh", "-c", `echo '{"foo": "bar"}'`]);
+    const parsed = jsonResult.json<{ foo: string }>();
+    assert.equal(parsed.foo, "bar");
+
+    // Test .ok helper
+    const okResult = await vm.exec(["true"]);
+    assert.equal(okResult.ok, true);
+
+    const failResult = await vm.exec(["false"]);
+    assert.equal(failResult.ok, false);
+  } finally {
+    await vm.stop();
+  }
+});
+
+test("exec streaming with async iterator", { timeout: timeoutMs }, async () => {
+  const vm = new VM({ url: url ?? undefined, token: token ?? undefined });
+
+  try {
+    const chunks: string[] = [];
+    const proc = vm.exec(["sh", "-c", "echo one; echo two; echo three"]);
+
+    for await (const chunk of proc) {
+      chunks.push(chunk);
+    }
+
+    const combined = chunks.join("");
+    assert.ok(combined.includes("one"), `missing 'one' in output: ${combined}`);
+    assert.ok(combined.includes("two"), `missing 'two' in output: ${combined}`);
+    assert.ok(combined.includes("three"), `missing 'three' in output: ${combined}`);
+  } finally {
+    await vm.stop();
+  }
+});
+
+test("exec with stdin", { timeout: timeoutMs }, async () => {
+  const vm = new VM({ url: url ?? undefined, token: token ?? undefined });
+
+  try {
+    // Test stdin as string
+    const result = await vm.exec(["cat"], { stdin: "hello world" });
+    assert.equal(result.stdout.trim(), "hello world");
   } finally {
     await vm.stop();
   }

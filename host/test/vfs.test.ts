@@ -42,10 +42,10 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean
     const read = await withTimeout(vm.exec(["sh", "-c", "cat /data/host.txt"]), timeoutMs);
     if (read.exitCode !== 0) {
       throw new Error(
-        `cat failed (exit ${read.exitCode}): ${read.stderr.toString().trim()}`
+        `cat failed (exit ${read.exitCode}): ${read.stderr.trim()}`
       );
     }
-    assert.equal(read.stdout.toString().trim(), "host-data");
+    assert.equal(read.stdout.trim(), "host-data");
 
     const write = await withTimeout(
       vm.exec(["sh", "-c", "echo -n guest-data > /data/guest.txt"]),
@@ -53,7 +53,7 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean
     );
     if (write.exitCode !== 0) {
       throw new Error(
-        `write failed (exit ${write.exitCode}): ${write.stderr.toString().trim()}`
+        `write failed (exit ${write.exitCode}): ${write.stderr.trim()}`
       );
     }
 
@@ -63,10 +63,10 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean
     );
     if (append.exitCode !== 0) {
       throw new Error(
-        `append failed (exit ${append.exitCode}): ${append.stderr.toString().trim()}`
+        `append failed (exit ${append.exitCode}): ${append.stderr.trim()}`
       );
     }
-    assert.equal(append.stdout.toString(), "foobar");
+    assert.equal(append.stdout, "foobar");
   } finally {
     await vm.stop();
   }
@@ -163,18 +163,18 @@ test("vfs supports read-only email mounts with dynamic content", { timeout: time
 
     const rootRead = await withTimeout(vm.exec(["sh", "-c", "cat /data/root.txt"]), timeoutMs);
     if (rootRead.exitCode !== 0) {
-      throw new Error(`cat root failed (exit ${rootRead.exitCode}): ${rootRead.stderr.toString().trim()}`);
+      throw new Error(`cat root failed (exit ${rootRead.exitCode}): ${rootRead.stderr.trim()}`);
     }
-    assert.equal(rootRead.stdout.toString().trim(), "root-data");
+    assert.equal(rootRead.stdout.trim(), "root-data");
 
     const emailRead = await withTimeout(
       vm.exec(["sh", "-c", `cat /app/email/${emailId}.eml`]),
       timeoutMs
     );
     if (emailRead.exitCode !== 0) {
-      throw new Error(`cat email failed (exit ${emailRead.exitCode}): ${emailRead.stderr.toString().trim()}`);
+      throw new Error(`cat email failed (exit ${emailRead.exitCode}): ${emailRead.stderr.trim()}`);
     }
-    assert.equal(emailRead.stdout.toString().trim(), emailBody);
+    assert.equal(emailRead.stdout.trim(), emailBody);
 
     const writeAttempt = await withTimeout(
       vm.exec(["sh", "-c", `echo nope > /app/email/${emailId}-new.eml`]),
