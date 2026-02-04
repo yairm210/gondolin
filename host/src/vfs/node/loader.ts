@@ -8,21 +8,8 @@ import internalModules from './internal-modules';
 
 const cache = new Map<string, { exports: Record<string, unknown> }>();
 
-function resolveVendorPath(startDir: string) {
-  let current = startDir;
-  for (let i = 0; i < 8; i += 1) {
-    const candidate = path.join(current, 'vendor', 'node-vfs', 'lib', 'internal', 'vfs');
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  throw new Error('Unable to locate vendor/node-vfs from ' + startDir);
-}
-
-const VENDOR_VFS_PATH = resolveVendorPath(__dirname);
+// node-vfs is now located at host/vendor/node-vfs
+const VENDOR_VFS_PATH = path.resolve(__dirname, '..', '..', '..', 'vendor', 'node-vfs', 'lib', 'internal', 'vfs');
 
 function createRequire(parentPath: string) {
   return function vfsRequire(id: string) {
