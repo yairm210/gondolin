@@ -28,6 +28,8 @@ import {
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
+const VFS_READY_ATTEMPTS = 50;
+const VFS_READY_SLEEP_SECONDS = 0.1;
 
 function formatLog(message: string) {
   if (message.endsWith("\n")) return message;
@@ -129,6 +131,7 @@ export class VM {
   private readonly fuseMount: string;
   private readonly fuseBinds: string[];
   private bootSent = false;
+  private vfsReadyPromise: Promise<void> | null = null;
 
   constructor(options: VMOptions = {}) {
     if (options.url && options.server) {
@@ -238,6 +241,11 @@ export class VM {
     return this.stopPromise;
   }
 
+  async waitForReady(): Promise<void> {
+    await this.start();
+    await this.ensureVfsReady();
+  }
+
   async exec(command: ExecInput, options: ExecOptions = {}): Promise<ExecResult> {
     const stream = await this.execStream(command, { ...options, buffer: true });
     return stream.result;
@@ -248,7 +256,14 @@ export class VM {
     options: ExecStreamOptions = {}
   ): Promise<ExecStream> {
     await this.start();
+    await this.ensureVfsReady();
+    return this.execStreamInternal(command, options);
+  }
 
+  private async execStreamInternal(
+    command: ExecInput,
+    options: ExecStreamOptions = {}
+  ): Promise<ExecStream> {
     const { cmd, argv } = normalizeCommand(command, options);
     const id = this.allocateId();
 
@@ -304,6 +319,14 @@ export class VM {
     };
   }
 
+  private async execInternal(
+    command: ExecInput,
+    options: ExecStreamOptions = {}
+  ): Promise<ExecResult> {
+    const stream = await this.execStreamInternal(command, { ...options, buffer: true });
+    return stream.result;
+  }
+
   private async startInternal() {
     if (this.server) {
       const address = await this.server.start();
@@ -323,6 +346,7 @@ export class VM {
       await this.vfs.close();
     }
     await this.disconnect();
+    this.vfsReadyPromise = null;
   }
 
   private allocateId(): number {
@@ -484,6 +508,7 @@ export class VM {
   private resetConnectionState() {
     this.state = "unknown";
     this.bootSent = false;
+    this.vfsReadyPromise = null;
     this.initStatusPromise();
   }
 
@@ -524,6 +549,39 @@ export class VM {
     if (nextState === "running") return;
 
     await this.waitForState("running");
+  }
+
+  private async ensureVfsReady() {
+    if (!this.vfs) return;
+    if (!this.vfsReadyPromise) {
+      this.vfsReadyPromise = this.waitForVfsReadyInternal().catch((error) => {
+        this.vfsReadyPromise = null;
+        throw error;
+      });
+    }
+    await this.vfsReadyPromise;
+  }
+
+  private async waitForVfsReadyInternal() {
+    await this.waitForMount(this.fuseMount, "fuse.sandboxfs");
+    for (const mountPoint of this.fuseBinds) {
+      await this.waitForMount(mountPoint);
+    }
+  }
+
+  private async waitForMount(mountPoint: string, fsType?: string) {
+    const mountCheck = fsType
+      ? `grep -q " $1 ${fsType} " /proc/mounts`
+      : `grep -q " $1 " /proc/mounts`;
+    const script = `for i in $(seq 1 ${VFS_READY_ATTEMPTS}); do ${mountCheck} && exit 0; sleep ${VFS_READY_SLEEP_SECONDS}; done; exit 1`;
+    const result = await this.execInternal(["sh", "-c", script, "sh", mountPoint]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `vfs mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr
+          .toString()
+          .trim()}`
+      );
+    }
   }
 
   private async waitForStatus(): Promise<SandboxState> {

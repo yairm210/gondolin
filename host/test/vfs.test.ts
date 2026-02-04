@@ -25,38 +25,6 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   }
 }
 
-async function waitForDataMount(vm: VM) {
-  const result = await withTimeout(
-    vm.exec([
-      "sh",
-      "-c",
-      "for i in $(seq 1 50); do grep -q ' /data fuse.sandboxfs ' /proc/mounts && exit 0; sleep 0.1; done; exit 1",
-    ]),
-    timeoutMs
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `sandboxfs mount not ready (exit ${result.exitCode}): ${result.stderr.toString().trim()}`
-    );
-  }
-}
-
-async function waitForBindMount(vm: VM, mountPoint: string) {
-  const result = await withTimeout(
-    vm.exec([
-      "sh",
-      "-c",
-      `for i in $(seq 1 50); do grep -q ' ${mountPoint} ' /proc/mounts && exit 0; sleep 0.1; done; exit 1`,
-    ]),
-    timeoutMs
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `bind mount ${mountPoint} not ready (exit ${result.exitCode}): ${result.stderr.toString().trim()}`
-    );
-  }
-}
-
 test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
   const provider = new MemoryProvider();
   const handle = await provider.open("/host.txt", "w+");
@@ -69,7 +37,7 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean
   });
 
   try {
-    await waitForDataMount(vm);
+    await vm.waitForReady();
 
     const read = await withTimeout(vm.exec(["sh", "-c", "cat /data/host.txt"]), timeoutMs);
     if (read.exitCode !== 0) {
@@ -131,7 +99,7 @@ test("vfs hooks can block writes", { timeout: timeoutMs, skip: Boolean(url) }, a
   });
 
   try {
-    await waitForDataMount(vm);
+    await vm.waitForReady();
 
     const result = await withTimeout(
       vm.exec(["sh", "-c", "echo nope > /data/blocked.txt"]),
@@ -191,8 +159,7 @@ test("vfs supports read-only email mounts with dynamic content", { timeout: time
   });
 
   try {
-    await waitForDataMount(vm);
-    await waitForBindMount(vm, "/app");
+    await vm.waitForReady();
 
     const rootRead = await withTimeout(vm.exec(["sh", "-c", "cat /data/root.txt"]), timeoutMs);
     if (rootRead.exitCode !== 0) {
