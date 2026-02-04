@@ -1,9 +1,9 @@
 import os from "os";
 import path from "path";
+import type { Dirent, Stats } from "node:fs";
 
 import { createErrnoError } from "./errors";
-import { SandboxVfsProvider, type VfsBackendHandle } from "./provider";
-import { VfsDirent, VfsStats } from "./stats";
+import type { VirtualFileHandle, VirtualProvider } from "./node";
 import type { FsRequest, FsResponse } from "../virtio-protocol";
 
 const { errno: ERRNO } = os.constants;
@@ -40,7 +40,7 @@ export type FsRpcServiceOptions = {
 };
 
 type HandleEntry = {
-  handle: VfsBackendHandle;
+  handle: VirtualFileHandle;
   ino: number;
   path: string;
   append: boolean;
@@ -61,7 +61,7 @@ export class FsRpcService {
     ops: {},
   };
 
-  constructor(private readonly provider: SandboxVfsProvider, options: FsRpcServiceOptions = {}) {
+  constructor(private readonly provider: VirtualProvider, options: FsRpcServiceOptions = {}) {
     this.logger = options.logger;
     this.pathToIno.set("/", 1);
     this.inoToPath.set(1, "/");
@@ -180,7 +180,7 @@ export class FsRpcService {
     const offset = requireUint(req.offset ?? 0, "readdir", "offset");
     const maxEntries = Math.max(1, Math.min(4096, requireUint(req.max_entries ?? 1024, "readdir", "max_entries")));
     const entries = (await this.provider.readdir(entryPath, { withFileTypes: true })) as Array<
-      string | VfsDirent
+      string | Dirent
     >;
     const start = Math.min(offset, entries.length);
 
@@ -218,7 +218,7 @@ export class FsRpcService {
     const { openFlags, truncate, append } = parseOpenFlagsForOpen(flags);
     const handle = await this.provider.open(entryPath, openFlags);
     if (truncate) {
-      await this.provider.truncate(entryPath, 0);
+      await this.truncatePath(entryPath, 0);
     }
     const fh = this.allocateHandle(handle, ino, entryPath, append);
     return { fh, open_flags: 0 };
@@ -339,7 +339,7 @@ export class FsRpcService {
     const ino = requireUint(req.ino, "truncate", "ino");
     const size = requireUint(req.size ?? 0, "truncate", "size");
     const entryPath = this.requirePath(ino, "truncate");
-    await this.provider.truncate(entryPath, size);
+    await this.truncatePath(entryPath, size);
     return {};
   }
 
@@ -352,6 +352,20 @@ export class FsRpcService {
     this.handles.delete(fh);
     await entry.handle.close();
     return {};
+  }
+
+  private async truncatePath(entryPath: string, size: number) {
+    const provider = this.provider as { truncate?: (path: string, size: number) => Promise<void> };
+    if (provider.truncate) {
+      await provider.truncate(entryPath, size);
+      return;
+    }
+    const handle = await this.provider.open(entryPath, "r+");
+    try {
+      await handle.truncate(size);
+    } finally {
+      await handle.close();
+    }
   }
 
   private record(op: string, err: number, res: Record<string, unknown> | undefined, durationMs: number) {
@@ -388,7 +402,7 @@ export class FsRpcService {
   }
 
   private allocateHandle(
-    handle: VfsBackendHandle,
+    handle: VirtualFileHandle,
     ino: number,
     entryPath: string,
     append: boolean
@@ -481,7 +495,7 @@ function requireBuffer(value: unknown, op: string) {
   return value;
 }
 
-function statsToAttr(ino: number, stats: VfsStats) {
+function statsToAttr(ino: number, stats: Stats) {
   return {
     ino,
     mode: stats.mode,
@@ -535,8 +549,21 @@ function parseOpenFlagsForOpen(flags: number) {
   return { openFlags, truncate, append: appendEnabled };
 }
 
-async function direntType(entry: string | VfsDirent, entryPath: string, provider: SandboxVfsProvider) {
-  if (entry instanceof VfsDirent) {
+type DirentLike = { name: string; isDirectory(): boolean; isSymbolicLink(): boolean };
+
+function isDirentLike(entry: unknown): entry is DirentLike {
+  return Boolean(
+    entry &&
+      typeof entry === "object" &&
+      "isDirectory" in entry &&
+      typeof (entry as { isDirectory: () => boolean }).isDirectory === "function" &&
+      "isSymbolicLink" in entry &&
+      typeof (entry as { isSymbolicLink: () => boolean }).isSymbolicLink === "function"
+  );
+}
+
+async function direntType(entry: string | Dirent, entryPath: string, provider: VirtualProvider) {
+  if (isDirentLike(entry)) {
     if (entry.isDirectory()) return DT_DIR;
     if (entry.isSymbolicLink()) return DT_LNK;
     return DT_REG;

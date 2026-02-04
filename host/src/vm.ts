@@ -13,9 +13,9 @@ import { SandboxWsServer, SandboxWsServerOptions } from "./sandbox-ws-server";
 import type { SandboxState } from "./sandbox-controller";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import {
-  InMemoryFsBackend,
+  MemoryProvider,
   SandboxVfsProvider,
-  type VfsBackend,
+  VirtualProvider,
   type VfsHooks,
 } from "./vfs";
 
@@ -59,8 +59,7 @@ export type ExecStream = {
 };
 
 export type VmVfsOptions = {
-  provider?: SandboxVfsProvider;
-  backend?: VfsBackend;
+  provider?: VirtualProvider;
   hooks?: VfsHooks;
 };
 
@@ -137,7 +136,8 @@ export class VM {
       throw new Error("VM cannot specify both vfs and server.vfsProvider");
     }
     if (serverOptions.vfsProvider) {
-      this.vfs = serverOptions.vfsProvider;
+      this.vfs = wrapProvider(serverOptions.vfsProvider, {});
+      serverOptions.vfsProvider = this.vfs;
     }
     if (options.fetch && serverOptions.fetch === undefined) {
       serverOptions.fetch = options.fetch;
@@ -684,10 +684,15 @@ function normalizeCommand(command: ExecInput, options: ExecOptions): {
 function resolveVmVfs(options?: VmVfsOptions | null) {
   if (options === null) return null;
   if (!options) {
-    return new SandboxVfsProvider(new InMemoryFsBackend());
+    return new SandboxVfsProvider(new MemoryProvider());
   }
-  if (options.provider) return options.provider;
-  return new SandboxVfsProvider(options.backend ?? new InMemoryFsBackend(), options.hooks ?? {});
+  const provider = options.provider ?? new MemoryProvider();
+  return wrapProvider(provider, options.hooks ?? {});
+}
+
+function wrapProvider(provider: VirtualProvider, hooks: VfsHooks) {
+  if (provider instanceof SandboxVfsProvider) return provider;
+  return new SandboxVfsProvider(provider, hooks);
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<Buffer> {

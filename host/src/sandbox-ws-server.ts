@@ -28,7 +28,7 @@ import { SandboxController, SandboxConfig, SandboxState } from "./sandbox-contro
 import { QemuNetworkBackend } from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import type { SandboxPolicy } from "./policy";
-import { FsRpcService, type SandboxVfsProvider } from "./vfs";
+import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_JSON_BYTES = 256 * 1024;
@@ -61,7 +61,7 @@ export type SandboxWsServerOptions = {
   policy?: SandboxPolicy;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
-  vfsProvider?: SandboxVfsProvider;
+  vfsProvider?: VirtualProvider;
 };
 
 export type SandboxWsServerAddress = {
@@ -96,7 +96,7 @@ type ResolvedServerOptions = {
   policy: SandboxPolicy | null;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
-  vfsProvider: SandboxVfsProvider | null;
+  vfsProvider: VirtualProvider | null;
 };
 
 export function resolveSandboxWsServerOptions(
@@ -441,7 +441,11 @@ export class SandboxWsServer extends EventEmitter {
     super();
     this.options = resolveSandboxWsServerOptions(options);
     this.policy = this.options.policy;
-    this.vfsProvider = this.options.vfsProvider;
+    this.vfsProvider = this.options.vfsProvider
+      ? this.options.vfsProvider instanceof SandboxVfsProvider
+        ? this.options.vfsProvider
+        : new SandboxVfsProvider(this.options.vfsProvider)
+      : null;
 
     const hostArch = detectHostArch();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";

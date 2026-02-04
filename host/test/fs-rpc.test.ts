@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import test from "node:test";
 
-import { FsRpcService, InMemoryFsBackend, MAX_RPC_DATA, SandboxVfsProvider } from "../src/vfs";
+import { FsRpcService, MemoryProvider, MAX_RPC_DATA } from "../src/vfs";
 
 const { errno: ERRNO } = os.constants;
 
 function createService() {
-  return new FsRpcService(new SandboxVfsProvider(new InMemoryFsBackend()));
+  return new FsRpcService(new MemoryProvider());
 }
 
 async function send(service: FsRpcService, op: string, req: Record<string, unknown>, id = 1) {

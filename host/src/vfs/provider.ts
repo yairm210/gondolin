@@ -1,9 +1,11 @@
 import os from "os";
 
 import { createErrnoError } from "./errors";
-import type { VfsStats } from "./stats";
+import { VirtualProvider as VirtualProviderBase } from "./node";
+import type { VirtualProvider, VirtualFileHandle } from "./node";
 
 const { errno: ERRNO } = os.constants;
+const VirtualProviderClass = VirtualProviderBase as unknown as { new (...args: any[]): any };
 
 export type VfsHookContext = {
   op: string;
@@ -25,56 +27,32 @@ export type VfsHooks = {
   after?: (context: VfsHookContext) => void | Promise<void>;
 };
 
-export interface VfsBackendHandle {
-  read(buffer: Buffer, offset: number, length: number, position?: number | null): Promise<{
-    bytesRead: number;
-    buffer: Buffer;
-  }>;
-  readSync(buffer: Buffer, offset: number, length: number, position?: number | null): number;
-  write(buffer: Buffer, offset: number, length: number, position?: number | null): Promise<{
-    bytesWritten: number;
-    buffer: Buffer;
-  }>;
-  writeSync(buffer: Buffer, offset: number, length: number, position?: number | null): number;
-  readFile(options?: { encoding?: BufferEncoding } | BufferEncoding): Promise<Buffer | string>;
-  readFileSync(options?: { encoding?: BufferEncoding } | BufferEncoding): Buffer | string;
-  writeFile(data: Buffer | string, options?: { encoding?: BufferEncoding }): Promise<void>;
-  writeFileSync(data: Buffer | string, options?: { encoding?: BufferEncoding }): void;
-  stat(options?: object): Promise<VfsStats>;
-  statSync(options?: object): VfsStats;
-  truncate(len?: number): Promise<void>;
-  truncateSync(len?: number): void;
-  close(): Promise<void>;
-  closeSync(): void;
-}
-
-export interface VfsBackend {
-  readonly: boolean;
-  open(path: string, flags: string, mode?: number): Promise<VfsBackendHandle>;
-  openSync(path: string, flags: string, mode?: number): VfsBackendHandle;
-  stat(path: string, options?: object): Promise<VfsStats>;
-  statSync(path: string, options?: object): VfsStats;
-  readdir(path: string, options?: object): Promise<Array<string | object>>;
-  readdirSync(path: string, options?: object): Array<string | object>;
-  mkdir(path: string, options?: object): Promise<void | string>;
-  mkdirSync(path: string, options?: object): void | string;
-  rmdir(path: string): Promise<void>;
-  rmdirSync(path: string): void;
-  unlink(path: string): Promise<void>;
-  unlinkSync(path: string): void;
-  rename(oldPath: string, newPath: string): Promise<void>;
-  renameSync(oldPath: string, newPath: string): void;
-  truncate(path: string, length: number): Promise<void>;
-  truncateSync(path: string, length: number): void;
-  close?: () => Promise<void> | void;
-}
-
-class HookedHandle implements VfsBackendHandle {
+class HookedHandle implements VirtualFileHandle {
   constructor(
-    private readonly inner: VfsBackendHandle,
+    private readonly inner: VirtualFileHandle,
     private readonly hooks: VfsHooks,
-    private readonly path: string
+    private readonly handlePath: string
   ) {}
+
+  get path() {
+    return this.inner.path ?? this.handlePath;
+  }
+
+  get flags() {
+    return this.inner.flags;
+  }
+
+  get mode() {
+    return this.inner.mode;
+  }
+
+  get position() {
+    return this.inner.position;
+  }
+
+  get closed() {
+    return this.inner.closed;
+  }
 
   async read(buffer: Buffer, offset: number, length: number, position?: number | null) {
     await this.runBefore({ op: "read", path: this.path, offset: position ?? undefined, length });
@@ -199,14 +177,21 @@ class HookedHandle implements VfsBackendHandle {
   }
 }
 
-export class SandboxVfsProvider {
-  readonly supportsSymlinks = false;
-  readonly supportsWatch = false;
-
-  constructor(private readonly backend: VfsBackend, private readonly hooks: VfsHooks = {}) {}
+export class SandboxVfsProvider extends VirtualProviderClass implements VirtualProvider {
+  constructor(private readonly backend: VirtualProvider, private readonly hooks: VfsHooks = {}) {
+    super();
+  }
 
   get readonly() {
     return this.backend.readonly;
+  }
+
+  get supportsSymlinks() {
+    return this.backend.supportsSymlinks;
+  }
+
+  get supportsWatch() {
+    return this.backend.supportsWatch;
   }
 
   async open(path: string, flags: string, mode?: number) {
@@ -238,11 +223,17 @@ export class SandboxVfsProvider {
   }
 
   async lstat(path: string, options?: object) {
-    return this.stat(path, options);
+    await this.runBefore({ op: "lstat", path });
+    const stats = await this.backend.lstat(path, options);
+    await this.runAfter({ op: "lstat", path, result: stats });
+    return stats;
   }
 
   lstatSync(path: string, options?: object) {
-    return this.statSync(path, options);
+    this.runBeforeSync({ op: "lstat", path });
+    const stats = this.backend.lstatSync(path, options);
+    this.runAfterSync({ op: "lstat", path, result: stats });
+    return stats;
   }
 
   async readdir(path: string, options?: object) {
@@ -333,128 +324,86 @@ export class SandboxVfsProvider {
     this.runAfterSync({ op: "rename", oldPath, newPath });
   }
 
-  async readFile(path: string, options?: { encoding?: BufferEncoding } | BufferEncoding) {
-    const handle = await this.open(path, "r");
-    try {
-      return await handle.readFile(options);
-    } finally {
-      await handle.close();
+  async readlink(path: string, options?: object) {
+    if (this.backend.readlink) {
+      return this.backend.readlink(path, options);
     }
+    return super.readlink(path, options);
   }
 
-  readFileSync(path: string, options?: { encoding?: BufferEncoding } | BufferEncoding) {
-    const handle = this.openSync(path, "r");
-    try {
-      return handle.readFileSync(options);
-    } finally {
-      handle.closeSync();
+  readlinkSync(path: string, options?: object) {
+    if (this.backend.readlinkSync) {
+      return this.backend.readlinkSync(path, options);
     }
+    return super.readlinkSync(path, options);
   }
 
-  async writeFile(path: string, data: Buffer | string, options?: { encoding?: BufferEncoding; mode?: number }) {
-    if (this.readonly) {
-      throw createErrnoError(ERRNO.EROFS, "open", path);
-    }
-    const handle = await this.open(path, "w", options?.mode);
-    try {
-      await handle.writeFile(data, options);
-    } finally {
-      await handle.close();
-    }
-  }
-
-  writeFileSync(path: string, data: Buffer | string, options?: { encoding?: BufferEncoding; mode?: number }) {
-    if (this.readonly) {
-      throw createErrnoError(ERRNO.EROFS, "open", path);
-    }
-    const handle = this.openSync(path, "w", options?.mode);
-    try {
-      handle.writeFileSync(data, options);
-    } finally {
-      handle.closeSync();
-    }
-  }
-
-  async appendFile(path: string, data: Buffer | string, options?: { encoding?: BufferEncoding; mode?: number }) {
-    if (this.readonly) {
-      throw createErrnoError(ERRNO.EROFS, "open", path);
-    }
-    const handle = await this.open(path, "a", options?.mode);
-    try {
-      await handle.writeFile(data, options);
-    } finally {
-      await handle.close();
-    }
-  }
-
-  appendFileSync(path: string, data: Buffer | string, options?: { encoding?: BufferEncoding; mode?: number }) {
-    if (this.readonly) {
-      throw createErrnoError(ERRNO.EROFS, "open", path);
-    }
-    const handle = this.openSync(path, "a", options?.mode);
-    try {
-      handle.writeFileSync(data, options);
-    } finally {
-      handle.closeSync();
-    }
-  }
-
-  async exists(path: string) {
-    try {
-      await this.stat(path);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  existsSync(path: string) {
-    try {
-      this.statSync(path);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async realpath(path: string) {
-    await this.stat(path);
-    return path;
-  }
-
-  realpathSync(path: string) {
-    this.statSync(path);
-    return path;
-  }
-
-  async access(path: string) {
-    await this.stat(path);
-  }
-
-  accessSync(path: string) {
-    this.statSync(path);
-  }
-
-  async readlink(path: string) {
-    throw createErrnoError(ERRNO.ENOENT, "readlink", path);
-  }
-
-  readlinkSync(path: string) {
-    throw createErrnoError(ERRNO.ENOENT, "readlink", path);
-  }
-
-  async symlink(target: string, path: string) {
+  async symlink(target: string, path: string, type?: string) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "symlink", path);
     }
-    throw createErrnoError(ERRNO.ENOENT, "symlink", path);
+    if (this.backend.symlink) {
+      return this.backend.symlink(target, path, type);
+    }
+    return super.symlink(target, path, type);
   }
 
-  symlinkSync(target: string, path: string) {
+  symlinkSync(target: string, path: string, type?: string) {
     if (this.readonly) {
       throw createErrnoError(ERRNO.EROFS, "symlink", path);
     }
-    throw createErrnoError(ERRNO.ENOENT, "symlink", path);
+    if (this.backend.symlinkSync) {
+      return this.backend.symlinkSync(target, path, type);
+    }
+    return super.symlinkSync(target, path, type);
+  }
+
+  async realpath(path: string, options?: object) {
+    if (this.backend.realpath) {
+      return this.backend.realpath(path, options);
+    }
+    return super.realpath(path, options);
+  }
+
+  realpathSync(path: string, options?: object) {
+    if (this.backend.realpathSync) {
+      return this.backend.realpathSync(path, options);
+    }
+    return super.realpathSync(path, options);
+  }
+
+  async access(path: string, mode?: number) {
+    if (this.backend.access) {
+      return this.backend.access(path, mode);
+    }
+    return super.access(path, mode);
+  }
+
+  accessSync(path: string, mode?: number) {
+    if (this.backend.accessSync) {
+      return this.backend.accessSync(path, mode);
+    }
+    return super.accessSync(path, mode);
+  }
+
+  watch(path: string, options?: object) {
+    return this.backend.watch?.(path, options) ?? super.watch(path, options);
+  }
+
+  watchAsync(path: string, options?: object) {
+    return this.backend.watchAsync?.(path, options) ?? super.watchAsync(path, options);
+  }
+
+  watchFile(path: string, options?: object, listener?: (...args: unknown[]) => void) {
+    return this.backend.watchFile?.(path, options, listener) ?? super.watchFile(path, options);
+  }
+
+  unwatchFile(path: string, listener?: (...args: unknown[]) => void) {
+    if (this.backend.unwatchFile) {
+      this.backend.unwatchFile(path, listener);
+      return;
+    }
+    super.unwatchFile(path, listener);
   }
 
   async truncate(path: string, length: number) {
@@ -462,7 +411,19 @@ export class SandboxVfsProvider {
       throw createErrnoError(ERRNO.EROFS, "truncate", path);
     }
     await this.runBefore({ op: "truncate", path, size: length });
-    await this.backend.truncate(path, length);
+    const backendWithTruncate = this.backend as unknown as {
+      truncate?: (entryPath: string, length: number) => Promise<void>;
+    };
+    if (typeof backendWithTruncate.truncate === "function") {
+      await backendWithTruncate.truncate(path, length);
+    } else {
+      const handle = await this.backend.open(path, "r+");
+      try {
+        await handle.truncate(length);
+      } finally {
+        await handle.close();
+      }
+    }
     await this.runAfter({ op: "truncate", path, size: length });
   }
 
@@ -471,17 +432,30 @@ export class SandboxVfsProvider {
       throw createErrnoError(ERRNO.EROFS, "truncate", path);
     }
     this.runBeforeSync({ op: "truncate", path, size: length });
-    this.backend.truncateSync(path, length);
+    const backendWithTruncate = this.backend as unknown as {
+      truncateSync?: (entryPath: string, length: number) => void;
+    };
+    if (typeof backendWithTruncate.truncateSync === "function") {
+      backendWithTruncate.truncateSync(path, length);
+    } else {
+      const handle = this.backend.openSync(path, "r+");
+      try {
+        handle.truncateSync(length);
+      } finally {
+        handle.closeSync();
+      }
+    }
     this.runAfterSync({ op: "truncate", path, size: length });
   }
 
   async close() {
-    if (this.backend.close) {
-      await this.backend.close();
+    const backend = this.backend as { close?: () => Promise<void> | void };
+    if (backend.close) {
+      await backend.close();
     }
   }
 
-  private wrapHandle(path: string, handle: VfsBackendHandle) {
+  private wrapHandle(path: string, handle: VirtualFileHandle) {
     if (!this.hooks.before && !this.hooks.after) {
       return handle;
     }

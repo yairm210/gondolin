@@ -1,14 +1,17 @@
 import net from "net";
 import path from "path";
-import fs from "fs";
+import fs from "node:fs";
 import os from "os";
 import cbor from "cbor";
+import type { Dirent, Stats } from "node:fs";
 
 import { FrameReader, encodeFrame, normalize } from "../virtio-protocol";
 import { createErrnoError } from "./errors";
-import { VfsStats, VfsDirent } from "./stats";
+import { VirtualProvider as VirtualProviderBase } from "./node";
+import type { VirtualProvider, VirtualFileHandle } from "./node";
 
 const { errno: ERRNO } = os.constants;
+const VirtualProviderClass = VirtualProviderBase as unknown as { new (...args: any[]): any };
 
 export type FsRequestMessage = {
   v: number;
@@ -184,17 +187,31 @@ export class FsRpcClient {
   }
 }
 
-export class RpcFileHandle {
-  private closed = false;
-  private position = 0;
+export class RpcFileHandle implements VirtualFileHandle {
+  private isClosed = false;
+  private cursor = 0;
 
   constructor(
     private readonly client: FsRpcClient,
     private readonly ino: number,
-    private readonly fh: number
+    private readonly fh: number,
+    public readonly path: string,
+    public readonly flags: string
   ) {}
 
-  readSync(_buffer: Buffer, _offset: number, _length: number, _position?: number | null) {
+  get position() {
+    return this.cursor;
+  }
+
+  set position(value: number) {
+    this.cursor = value;
+  }
+
+  get closed() {
+    return this.isClosed;
+  }
+
+  readSync(_buffer: Buffer, _offset: number, _length: number, _position?: number | null): number {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "read");
   }
@@ -217,7 +234,7 @@ export class RpcFileHandle {
     return { bytesRead: data.length, buffer } as const;
   }
 
-  writeSync(_buffer: Buffer, _offset: number, _length: number, _position?: number | null) {
+  writeSync(_buffer: Buffer, _offset: number, _length: number, _position?: number | null): number {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "write");
   }
@@ -239,7 +256,7 @@ export class RpcFileHandle {
     return { bytesWritten: written, buffer } as const;
   }
 
-  readFileSync(_options?: { encoding?: BufferEncoding } | BufferEncoding) {
+  readFileSync(_options?: { encoding?: BufferEncoding } | BufferEncoding): Buffer | string {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "readFile");
   }
@@ -291,7 +308,7 @@ export class RpcFileHandle {
     this.position = buffer.length;
   }
 
-  statSync() {
+  statSync(): Stats {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "stat");
   }
@@ -320,16 +337,58 @@ export class RpcFileHandle {
   }
 
   async close() {
-    if (this.closed) return;
+    if (this.isClosed) return;
     const response = await this.client.request("release", { fh: this.fh });
     assertOk(response, "release");
-    this.closed = true;
+    this.isClosed = true;
   }
 
   private ensureOpen() {
-    if (this.closed) {
+    if (this.isClosed) {
       throw createErrnoError(ERRNO.EBADF, "read");
     }
+  }
+}
+
+class RpcDirent {
+  readonly parentPath: string;
+  readonly path: string;
+
+  constructor(
+    public readonly name: string,
+    private readonly entryType: "file" | "dir" | "symlink",
+    parentPath = ""
+  ) {
+    this.parentPath = parentPath;
+    this.path = parentPath;
+  }
+
+  isFile() {
+    return this.entryType === "file";
+  }
+
+  isDirectory() {
+    return this.entryType === "dir";
+  }
+
+  isSymbolicLink() {
+    return this.entryType === "symlink";
+  }
+
+  isBlockDevice() {
+    return false;
+  }
+
+  isCharacterDevice() {
+    return false;
+  }
+
+  isFIFO() {
+    return false;
+  }
+
+  isSocket() {
+    return false;
   }
 }
 
@@ -340,16 +399,19 @@ type RpcAttr = {
   uid: number;
   gid: number;
   size: number;
-  atime_ns: number;
-  mtime_ns: number;
-  ctime_ns: number;
+  atime_ms: number;
+  mtime_ms: number;
+  ctime_ms: number;
+  blocks?: number;
+  blksize?: number;
+  rdev?: number;
 };
 
-export class RpcFsBackend {
-  readonly readonly = false;
+export class RpcFsBackend extends VirtualProviderClass implements VirtualProvider {
   private readonly cache = new Map<string, CachedEntry>();
 
   constructor(private readonly client: FsRpcClient) {
+    super();
     const now = Date.now();
     this.cache.set("/", {
       ino: 1,
@@ -360,9 +422,9 @@ export class RpcFsBackend {
         uid: 0,
         gid: 0,
         size: 0,
-        atime_ns: now * 1_000_000,
-        mtime_ns: now * 1_000_000,
-        ctime_ns: now * 1_000_000,
+        atime_ms: now,
+        mtime_ms: now,
+        ctime_ms: now,
       },
       expiresAt: now + 1000,
       attrExpiresAt: now + 1000,
@@ -370,7 +432,19 @@ export class RpcFsBackend {
     });
   }
 
-  openSync(_entryPath: string, _flags: string, _mode?: number) {
+  get readonly() {
+    return false;
+  }
+
+  get supportsSymlinks() {
+    return false;
+  }
+
+  get supportsWatch() {
+    return false;
+  }
+
+  openSync(_entryPath: string, _flags: string, _mode?: number): VirtualFileHandle {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "open");
   }
@@ -391,7 +465,7 @@ export class RpcFsBackend {
       const created = response.p.res?.entry as { ino: number; attr: RpcAttr; entry_ttl_ms?: number; attr_ttl_ms?: number };
       entry = this.cacheEntry(normalized, created);
       const fh = response.p.res?.fh as number;
-      return new RpcFileHandle(this.client, entry.ino, fh);
+      return new RpcFileHandle(this.client, entry.ino, fh, normalized, flags);
     }
     if (!entry) {
       throw createErrnoError(ERRNO.ENOENT, "open", entryPath);
@@ -402,15 +476,15 @@ export class RpcFsBackend {
     if (flagInfo.truncate) {
       await this.client.request("truncate", { ino: entry.ino, size: 0 });
     }
-    return new RpcFileHandle(this.client, entry.ino, fh);
+    return new RpcFileHandle(this.client, entry.ino, fh, normalized, flags);
   }
 
-  statSync(_entryPath: string) {
+  statSync(_entryPath: string, _options?: object): Stats {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "stat");
   }
 
-  async stat(entryPath: string) {
+  async stat(entryPath: string, _options?: object) {
     const entry = await this.ensureEntry(entryPath);
     const response = await this.client.request("getattr", { ino: entry.ino });
     assertOk(response, "getattr", entryPath);
@@ -420,14 +494,23 @@ export class RpcFsBackend {
     return statsFromAttr(attr);
   }
 
-  readdirSync(_entryPath: string, _options?: { withFileTypes?: boolean }) {
+  lstatSync(_entryPath: string, _options?: object): Stats {
+    // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
+    throw createErrnoError(ERRNO.ENOSYS, "lstat");
+  }
+
+  async lstat(entryPath: string, options?: object) {
+    return this.stat(entryPath, options);
+  }
+
+  readdirSync(_entryPath: string, _options?: { withFileTypes?: boolean }): Array<string | Dirent> {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "readdir");
   }
 
   async readdir(entryPath: string, options?: { withFileTypes?: boolean }) {
     const entry = await this.ensureEntry(entryPath);
-    const names: Array<string | VfsDirent> = [];
+    const names: Array<string | Dirent> = [];
     let offset = 0;
     while (true) {
       const response = await this.client.request("readdir", {
@@ -439,7 +522,8 @@ export class RpcFsBackend {
       const entries = (response.p.res?.entries as Array<{ name: string; type: number; offset?: number }> | undefined) ?? [];
       for (const dirent of entries) {
         if (options?.withFileTypes) {
-          names.push(new VfsDirent(dirent.name, dirent.type === 2 ? "dir" : "file"));
+          const type = dirent.type === 2 ? "dir" : dirent.type === 10 ? "symlink" : "file";
+          names.push(new RpcDirent(dirent.name, type));
         } else {
           names.push(dirent.name);
         }
@@ -451,7 +535,7 @@ export class RpcFsBackend {
     return names;
   }
 
-  mkdirSync(_entryPath: string, _options?: { recursive?: boolean; mode?: number }) {
+  mkdirSync(_entryPath: string, _options?: { recursive?: boolean; mode?: number }): void | string {
     // XXX: Sync RPC would deadlock the event loop; use async APIs or move RPC to a worker.
     throw createErrnoError(ERRNO.ENOSYS, "mkdir");
   }
@@ -655,18 +739,27 @@ type CachedEntry = {
   negative: boolean;
 };
 
-function statsFromAttr(attr: RpcAttr) {
-  return new VfsStats({
-    mode: attr.mode,
-    nlink: attr.nlink,
-    uid: attr.uid,
-    gid: attr.gid,
-    size: attr.size,
-    atimeMs: attr.atime_ns / 1_000_000,
-    mtimeMs: attr.mtime_ns / 1_000_000,
-    ctimeMs: attr.ctime_ns / 1_000_000,
-    birthtimeMs: attr.ctime_ns / 1_000_000,
-  });
+function statsFromAttr(attr: RpcAttr): Stats {
+  const stats = Object.create(fs.Stats.prototype) as Stats;
+  stats.dev = 0;
+  stats.mode = attr.mode;
+  stats.nlink = attr.nlink;
+  stats.uid = attr.uid;
+  stats.gid = attr.gid;
+  stats.rdev = attr.rdev ?? 0;
+  stats.blksize = attr.blksize ?? 4096;
+  stats.ino = attr.ino;
+  stats.size = attr.size;
+  stats.blocks = attr.blocks ?? Math.ceil(attr.size / 512);
+  stats.atimeMs = attr.atime_ms;
+  stats.mtimeMs = attr.mtime_ms;
+  stats.ctimeMs = attr.ctime_ms;
+  stats.birthtimeMs = attr.ctime_ms;
+  stats.atime = new Date(stats.atimeMs);
+  stats.mtime = new Date(stats.mtimeMs);
+  stats.ctime = new Date(stats.ctimeMs);
+  stats.birthtime = new Date(stats.birthtimeMs);
+  return stats;
 }
 
 function assertOk(message: FsResponseMessage, syscall: string, entryPath?: string) {

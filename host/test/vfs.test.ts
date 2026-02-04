@@ -3,7 +3,7 @@ import os from "node:os";
 import test from "node:test";
 
 import { VM } from "../src/vm";
-import { InMemoryFsBackend } from "../src/vfs";
+import { MemoryProvider } from "../src/vfs";
 import { createErrnoError } from "../src/vfs/errors";
 
 const url = process.env.WS_URL;
@@ -42,14 +42,14 @@ async function waitForDataMount(vm: VM) {
 }
 
 test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
-  const backend = new InMemoryFsBackend();
-  const handle = await backend.open("/host.txt", "w+");
+  const provider = new MemoryProvider();
+  const handle = await provider.open("/host.txt", "w+");
   await handle.writeFile("host-data");
   await handle.close();
 
   const vm = new VM({
     server: { console: "none" },
-    vfs: { backend },
+    vfs: { provider },
   });
 
   try {
@@ -87,20 +87,20 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean
     await vm.stop();
   }
 
-  const guestHandle = await backend.open("/guest.txt", "r");
+  const guestHandle = await provider.open("/guest.txt", "r");
   const data = await guestHandle.readFile({ encoding: "utf-8" });
   await guestHandle.close();
   assert.equal(data, "guest-data");
 });
 
 test("vfs hooks can block writes", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
-  const backend = new InMemoryFsBackend();
+  const provider = new MemoryProvider();
   const blocked: string[] = [];
 
   const vm = new VM({
     server: { console: "none" },
     vfs: {
-      backend,
+      provider,
       hooks: {
         before: (ctx) => {
           if (ctx.op === "open" && ctx.path === "/blocked.txt" && typeof ctx.flags === "string") {
