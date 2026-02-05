@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "sandboxd",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/sandboxd/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
     const fs_exe = b.addExecutable(.{
         .name = "sandboxfs",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/sandboxfs.zig"),
+            .root_source_file = b.path("src/sandboxfs/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

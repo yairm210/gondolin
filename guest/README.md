@@ -14,7 +14,9 @@ tooling to boot the micro-VM under QEMU.
 
 ## Layout
 
-- `src/` — Zig sources for `sandboxd` and the virtio-serial RPC handling.
+- `src/sandboxd/` — Zig sources for `sandboxd` and exec RPC handling.
+- `src/sandboxfs/` — Zig sources for the FUSE filesystem daemon.
+- `src/shared/` — Shared CBOR/protocol/RPC helpers.
 - `image/` — initramfs build scripts and the minimal `/init`.
 - `build.zig` — Zig build definition for `sandboxd`.
 - `Makefile` — helpers to build, create images, and run QEMU.
