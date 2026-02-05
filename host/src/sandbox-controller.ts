@@ -2,6 +2,33 @@ import { EventEmitter } from "events";
 import { spawn, ChildProcess } from "child_process";
 import fs from "fs";
 
+const activeChildren = new Set<ChildProcess>();
+let exitHookRegistered = false;
+
+function registerExitHook() {
+  if (exitHookRegistered) return;
+  exitHookRegistered = true;
+  process.once("exit", () => {
+    for (const child of activeChildren) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }
+  });
+}
+
+function trackChild(child: ChildProcess) {
+  registerExitHook();
+  activeChildren.add(child);
+  const cleanup = () => {
+    activeChildren.delete(child);
+  };
+  child.once("exit", cleanup);
+  child.once("error", cleanup);
+}
+
 export type SandboxConfig = {
   qemuPath: string;
   kernelPath: string;
@@ -51,6 +78,7 @@ export class SandboxController extends EventEmitter {
     this.child = spawn(this.config.qemuPath, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    trackChild(this.child);
 
     this.child.stdout?.on("data", (chunk) => {
       this.emit("log", chunk.toString());

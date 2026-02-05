@@ -234,7 +234,7 @@ export function resolveSandboxWsServerOptions(
     cpu: options.cpu,
     console: options.console,
     token: options.token ?? process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN,
-    autoRestart: options.autoRestart ?? true,
+    autoRestart: options.autoRestart ?? false,
     append: options.append,
     maxJsonBytes: options.maxJsonBytes ?? DEFAULT_MAX_JSON_BYTES,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,

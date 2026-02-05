@@ -713,6 +713,9 @@ function parseWsServerArgs(argv: string[]): SandboxWsServerOptions {
       case "--token":
         args.token = argv[++i];
         break;
+      case "--restart":
+        args.autoRestart = true;
+        break;
       case "--no-restart":
         args.autoRestart = false;
         break;
@@ -752,7 +755,8 @@ function wsServerUsage() {
   console.log("  --cpu TYPE           Override QEMU CPU type");
   console.log("  --console stdio|none Console output");
   console.log("  --token TOKEN        Require token in Authorization header");
-  console.log("  --no-restart          Disable auto restart on exit");
+  console.log("  --restart            Enable auto restart on exit");
+  console.log("  --no-restart         Disable auto restart on exit (default)");
 }
 
 function formatWsServerLog(message: string) {
