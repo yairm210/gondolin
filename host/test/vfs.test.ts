@@ -38,7 +38,30 @@ const sharedVmOptions = {
   },
 };
 
+const fuseProvider = new MemoryProvider();
+const fuseHookEvents: Array<{ op: string; path?: string; oldPath?: string; newPath?: string }> = [];
+const fuseVmKey = "vfs-fuse-e2e";
+const fuseVmOptions = {
+  server: { console: "none" },
+  vfs: {
+    mounts: {
+      "/": fuseProvider,
+    },
+    hooks: {
+      before: (ctx: { op: string; path?: string; oldPath?: string; newPath?: string }) => {
+        fuseHookEvents.push({
+          op: ctx.op,
+          path: ctx.path,
+          oldPath: ctx.oldPath,
+          newPath: ctx.newPath,
+        });
+      },
+    },
+  },
+};
+
 test.after(() => closeVm(sharedVmKey));
+test.after(() => closeVm(fuseVmKey));
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | null = null;
@@ -114,6 +137,53 @@ test("vfs hooks can block writes", { timeout: timeoutMs }, async () => {
 
   assert.ok(blockedEntries.length > 0);
   assert.ok(blockedEntries.some((entry) => entry.startsWith("/blocked.txt:")));
+});
+
+test("fuse-backed /data triggers hooks for guest file operations", { timeout: timeoutMs }, async () => {
+  fuseHookEvents.length = 0;
+
+  await withVm(fuseVmKey, fuseVmOptions, async (vm) => {
+    await vm.waitForReady();
+
+    const mounts = await withTimeout(
+      vm.exec(["sh", "-c", "grep ' /data ' /proc/mounts"]),
+      timeoutMs
+    );
+    if (mounts.exitCode !== 0) {
+      throw new Error(`mount check failed (exit ${mounts.exitCode}): ${mounts.stderr.trim()}`);
+    }
+    assert.ok(mounts.stdout.includes("fuse.sandboxfs"));
+
+    fuseHookEvents.length = 0;
+
+    const script = [
+      "set -e",
+      "mkdir -p /data/fuse-e2e",
+      "printf 'fuse-data' > /data/fuse-e2e/hello.txt",
+      "cat /data/fuse-e2e/hello.txt >/dev/null",
+      "mv /data/fuse-e2e/hello.txt /data/fuse-e2e/hello-renamed.txt",
+      "rm /data/fuse-e2e/hello-renamed.txt",
+    ].join("; ");
+
+    const result = await withTimeout(vm.exec(["sh", "-c", script]), timeoutMs);
+    if (result.exitCode !== 0) {
+      throw new Error(`fuse operations failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+    }
+  });
+
+  const baseDir = "/fuse-e2e";
+  const filePath = `${baseDir}/hello.txt`;
+  const renamedPath = `${baseDir}/hello-renamed.txt`;
+
+  assert.ok(fuseHookEvents.some((event) => event.op === "mkdir" && event.path === baseDir));
+  assert.ok(fuseHookEvents.some((event) => event.op === "write" && event.path === filePath));
+  assert.ok(fuseHookEvents.some((event) => event.op === "read" && event.path === filePath));
+  assert.ok(
+    fuseHookEvents.some(
+      (event) => event.op === "rename" && event.oldPath === filePath && event.newPath === renamedPath
+    )
+  );
+  assert.ok(fuseHookEvents.some((event) => event.op === "unlink" && event.path === renamedPath));
 });
 
 test("vfs supports read-only email mounts with dynamic content", { timeout: timeoutMs }, async () => {

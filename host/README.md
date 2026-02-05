@@ -227,7 +227,7 @@ cd guest && make image
 # Run development CLI
 pnpm run bash
 
-# Run tests
+# Run tests (includes VM/FUSE end-to-end checks; requires QEMU + guest image assets)
 pnpm run test
 ```
 

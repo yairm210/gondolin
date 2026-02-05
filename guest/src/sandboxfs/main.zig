@@ -157,7 +157,6 @@ const FuseMkdirIn = struct {
 
 const FuseRenameIn = struct {
     newdir: u64,
-    flags: u32,
 };
 
 const FuseSetattrIn = struct {
@@ -603,7 +602,7 @@ const SandboxFs = struct {
             .{ .name = "old_name", .value = .{ .Text = old_name } },
             .{ .name = "new_parent_ino", .value = .{ .UInt = rename.newdir } },
             .{ .name = "new_name", .value = .{ .Text = new_name } },
-            .{ .name = "flags", .value = .{ .UInt = rename.flags } },
+            .{ .name = "flags", .value = .{ .UInt = 0 } },
         };
         var response = try self.rpc.?.request("rename", &fields);
         defer response.deinit();
@@ -1072,8 +1071,7 @@ fn parseMkdir(payload: []const u8) !FuseMkdirIn {
 fn parseRename(payload: []const u8) !FuseRenameIn {
     var offset: usize = 0;
     const newdir = try readU64(payload, &offset);
-    const flags = try readU32(payload, &offset);
-    return .{ .newdir = newdir, .flags = flags };
+    return .{ .newdir = newdir };
 }
 
 fn parseSetattr(payload: []const u8) !FuseSetattrIn {
