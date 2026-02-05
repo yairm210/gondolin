@@ -7,7 +7,6 @@ import {
   ExecResponseMessage,
   StatusMessage,
   decodeOutputFrame,
-  SandboxPolicy,
 } from "./ws-protocol";
 import {
   SandboxWsServer,
@@ -86,7 +85,6 @@ export type VMOptions = {
   url?: string;
   token?: string;
   server?: SandboxWsServerOptions;
-  policy?: SandboxPolicy;
   autoStart?: boolean;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
@@ -142,7 +140,6 @@ export class VM {
   }> = [];
   private sessions = new Map<number, ExecSession>();
   private nextId = 1;
-  private policy: SandboxPolicy | null;
   private vfs: SandboxVfsProvider | null;
   private readonly fuseMount: string;
   private readonly fuseBinds: string[];
@@ -179,9 +176,6 @@ export class VM {
     }
     if (serverOptions.host === undefined) serverOptions.host = "127.0.0.1";
     if (serverOptions.port === undefined) serverOptions.port = 0;
-    if (options.policy && serverOptions.policy === undefined) {
-      serverOptions.policy = options.policy;
-    }
     if (options.memory && serverOptions.memory === undefined) {
       serverOptions.memory = options.memory;
     }
@@ -214,7 +208,6 @@ export class VM {
     this.token =
       options.token ?? process.env.ELWING_TOKEN ?? process.env.SANDBOX_WS_TOKEN;
     this.autoStart = options.autoStart ?? true;
-    this.policy = options.policy ?? null;
     const mitmMounts = resolveMitmMounts(
       options.vfs,
       options.server?.mitmCertDir,
@@ -274,9 +267,6 @@ export class VM {
     }
     if (serverOptions.host === undefined) serverOptions.host = "127.0.0.1";
     if (serverOptions.port === undefined) serverOptions.port = 0;
-    if (this.policy && serverOptions.policy === undefined) {
-      serverOptions.policy = this.policy;
-    }
     if (options.memory && serverOptions.memory === undefined) {
       serverOptions.memory = options.memory;
     }
@@ -320,22 +310,8 @@ export class VM {
     return this.url;
   }
 
-  getPolicy() {
-    return this.policy;
-  }
-
   getVfs() {
     return this.vfs;
-  }
-
-  setPolicy(policy: SandboxPolicy) {
-    this.policy = policy;
-    if (this.server) {
-      this.server.setPolicy(policy);
-    }
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.sendJson({ type: "policy", policy });
-    }
   }
 
   async start() {
@@ -680,7 +656,6 @@ export class VM {
 
       ws.on("open", () => {
         opened = true;
-        this.flushPolicy();
         resolve();
       });
 
@@ -723,12 +698,6 @@ export class VM {
       this.statusResolve = resolve;
       this.statusReject = reject;
     });
-  }
-
-  private flushPolicy() {
-    if (this.policy) {
-      this.sendJson({ type: "policy", policy: this.policy });
-    }
   }
 
   private ensureBoot() {

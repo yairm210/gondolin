@@ -11,7 +11,6 @@
  * - pty_resize { type: "pty_resize", id, rows, cols }
  * - lifecycle { type: "lifecycle", action: "restart" | "shutdown" }
  * - boot { type: "boot", fuseMount?, fuseBinds? }
- * - policy { type: "policy", policy }
  *
  * Server → Client:
  * - status { type: "status", state: "starting" | "running" | "stopped" }
@@ -24,10 +23,6 @@
  * +---------+-----------+-------------------+
  * tag = 1 stdout, tag = 2 stderr, id big-endian.
  */
-import type { SandboxPolicy } from "./policy";
-
-export type { SandboxPolicy, SandboxPolicyRule } from "./policy";
-
 export type ExecCommandMessage = {
   type: "exec";
   id: number;
@@ -64,18 +59,12 @@ export type BootCommandMessage = {
   fuseBinds?: string[];
 };
 
-export type PolicyCommandMessage = {
-  type: "policy";
-  policy: SandboxPolicy;
-};
-
 export type ClientMessage =
   | BootCommandMessage
   | ExecCommandMessage
   | StdinCommandMessage
   | PtyResizeCommandMessage
-  | LifecycleCommandMessage
-  | PolicyCommandMessage;
+  | LifecycleCommandMessage;
 
 export type ExecResponseMessage = {
   type: "exec_response";

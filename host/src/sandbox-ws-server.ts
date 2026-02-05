@@ -30,7 +30,6 @@ import {
 import { SandboxController, SandboxConfig, SandboxState } from "./sandbox-controller";
 import { QemuNetworkBackend, DEFAULT_MAX_HTTP_BODY_BYTES } from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
-import type { SandboxPolicy } from "./policy";
 import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
 import { parseDebugEnv } from "./debug";
 import { ensureGuestAssets, hasGuestAssets, type GuestAssets } from "./assets";
@@ -77,7 +76,6 @@ export type SandboxWsServerOptions = {
   append?: string;
   maxJsonBytes?: number;
   maxStdinBytes?: number;
-  policy?: SandboxPolicy;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
   maxHttpBodyBytes?: number;
@@ -121,7 +119,6 @@ export type ResolvedServerOptions = {
   maxJsonBytes: number;
   maxStdinBytes: number;
   maxHttpBodyBytes: number;
-  policy: SandboxPolicy | null;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
   mitmCertDir?: string;
@@ -239,7 +236,6 @@ export function resolveSandboxWsServerOptions(
     maxJsonBytes: options.maxJsonBytes ?? DEFAULT_MAX_JSON_BYTES,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
-    policy: options.policy ?? null,
     fetch: options.fetch,
     httpHooks: options.httpHooks,
     mitmCertDir: options.mitmCertDir,
@@ -576,7 +572,6 @@ export class SandboxWsServer extends EventEmitter {
   private startPromise: Promise<SandboxWsServerAddress> | null = null;
   private stopPromise: Promise<void> | null = null;
   private address: SandboxWsServerAddress | null = null;
-  private policy: SandboxPolicy | null;
   private qemuLogBuffer = "";
   private status: SandboxState = "stopped";
   private vfsReady = false;
@@ -625,7 +620,6 @@ export class SandboxWsServer extends EventEmitter {
     this.options = isResolved
       ? (options as ResolvedServerOptions)
       : resolveSandboxWsServerOptions(options as SandboxWsServerOptions);
-    this.policy = this.options.policy;
     this.vfsProvider = this.options.vfsProvider
       ? this.options.vfsProvider instanceof SandboxVfsProvider
         ? this.options.vfsProvider
@@ -670,7 +664,6 @@ export class SandboxWsServer extends EventEmitter {
           socketPath: this.options.netSocketPath,
           vmMac: mac,
           debug: this.options.netDebug,
-          policy: this.policy ?? undefined,
           fetch: this.options.fetch,
           httpHooks: this.options.httpHooks,
           mitmCertDir: this.options.mitmCertDir,
@@ -684,9 +677,6 @@ export class SandboxWsServer extends EventEmitter {
       });
       this.network.on("error", (err) => {
         this.emit("error", err);
-      });
-      this.network.on("policy", (policy) => {
-        this.emit("policy", policy);
       });
     }
 
@@ -857,22 +847,12 @@ export class SandboxWsServer extends EventEmitter {
     return this.status;
   }
 
-  getPolicy() {
-    return this.policy;
-  }
-
   getVfsProvider() {
     return this.vfsProvider;
   }
 
   getFsMetrics() {
     return this.fsService?.metrics ?? null;
-  }
-
-  setPolicy(policy: SandboxPolicy | null) {
-    this.policy = policy;
-    this.network?.setPolicy(policy);
-    this.emit("policy", policy);
   }
 
   private broadcastStatus(state: SandboxState) {
@@ -1098,7 +1078,7 @@ export class SandboxWsServer extends EventEmitter {
         return;
       }
 
-      if (!this.bootConfig && message.type !== "policy") {
+      if (!this.bootConfig) {
         sendError(ws, {
           type: "error",
           code: "missing_boot",
@@ -1119,8 +1099,6 @@ export class SandboxWsServer extends EventEmitter {
         } else if (message.action === "shutdown") {
           void this.controller.stop();
         }
-      } else if (message.type === "policy") {
-        this.handlePolicy(ws, message);
       } else {
         sendError(ws, {
           type: "error",
@@ -1324,10 +1302,6 @@ export class SandboxWsServer extends EventEmitter {
         message: "virtio bridge queue exceeded",
       });
     }
-  }
-
-  private handlePolicy(_ws: WebSocket, message: { policy: SandboxPolicy }) {
-    this.setPolicy(message.policy);
   }
 
   private failInflight(code: string, message: string) {

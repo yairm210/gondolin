@@ -30,8 +30,6 @@ import {
   TcpFlowProtocol,
   UdpSendMessage,
 } from "./network-stack";
-import type { SandboxPolicy } from "./policy";
-
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -159,7 +157,6 @@ export type QemuNetworkOptions = {
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
   mitmCertDir?: string;
-  policy?: SandboxPolicy;
   maxHttpBodyBytes?: number;
 };
 
@@ -180,12 +177,10 @@ export class QemuNetworkBackend extends EventEmitter {
   private caPromise: Promise<CaCert> | null = null;
   private tlsContexts = new Map<string, tls.SecureContext>();
   private tlsContextPromises = new Map<string, Promise<tls.SecureContext>>();
-  private policy: SandboxPolicy | null = null;
   private readonly maxHttpBodyBytes: number;
 
   constructor(private readonly options: QemuNetworkOptions) {
     super();
-    this.policy = options.policy ?? null;
     this.mitmDir = resolveMitmCertDir(options.mitmCertDir);
     this.maxHttpBodyBytes = options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES;
   }
@@ -209,15 +204,6 @@ export class QemuNetworkBackend extends EventEmitter {
       this.server.close();
       this.server = null;
     }
-  }
-
-  setPolicy(policy: SandboxPolicy | null) {
-    this.policy = policy;
-    this.emit("policy", policy);
-  }
-
-  getPolicy() {
-    return this.policy;
   }
 
   private attachSocket(socket: net.Socket) {
@@ -295,7 +281,6 @@ export class QemuNetworkBackend extends EventEmitter {
             };
           }
         }
-        // XXX: enforce SandboxPolicy allow/deny rules for HTTP/TLS flows here.
         return true;
       },
     });
@@ -346,7 +331,6 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private handleUdpSend(message: UdpSendMessage) {
-    // XXX: apply SandboxPolicy allow/deny rules for DNS/UDP destinations here.
     if (message.dstPort !== 53) {
       if (this.options.debug) {
         this.emit("log", `[net] udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`);

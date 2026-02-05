@@ -54,9 +54,6 @@ export {
 export type { HttpHooks, HttpHookRequest, HttpFetch } from "./qemu-net";
 export { HttpRequestBlockedError } from "./qemu-net";
 
-// Policy types
-export type { SandboxPolicy } from "./policy";
-
 // Asset management
 export {
   ensureGuestAssets,
