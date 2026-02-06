@@ -133,13 +133,16 @@ export type HttpHookRequest = {
   body: Buffer | null;
 };
 
+export type HeaderValue = string | string[];
+export type HttpResponseHeaders = Record<string, HeaderValue>;
+
 export type HttpHookResponse = {
   /** http status code */
   status: number;
   /** http status text */
   statusText: string;
   /** response headers */
-  headers: Record<string, string>;
+  headers: HttpResponseHeaders;
   /** response body */
   body: Buffer;
 };
@@ -1277,8 +1280,16 @@ export class QemuNetworkBackend extends EventEmitter {
         }
 
         let responseHeaders = this.stripHopByHopHeaders(this.headersToRecord(response.headers));
-        const contentEncoding = responseHeaders["content-encoding"];
-        const contentLength = responseHeaders["content-length"];
+        const contentEncodingValue = responseHeaders["content-encoding"];
+        const contentEncoding = Array.isArray(contentEncodingValue)
+          ? contentEncodingValue[0]
+          : contentEncodingValue;
+
+        const contentLengthValue = responseHeaders["content-length"];
+        const contentLength = Array.isArray(contentLengthValue)
+          ? contentLengthValue[0]
+          : contentLengthValue;
+
         const parsedLength = contentLength ? Number(contentLength) : null;
         const hasValidLength =
           parsedLength !== null && Number.isFinite(parsedLength) && parsedLength >= 0;
@@ -1442,14 +1453,28 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private sendHttpResponseHead(
     write: (chunk: Buffer) => void,
-    response: { status: number; statusText: string; headers: Record<string, string> },
+    response: { status: number; statusText: string; headers: HttpResponseHeaders },
     httpVersion: "HTTP/1.0" | "HTTP/1.1" = "HTTP/1.1"
   ) {
     const statusLine = `${httpVersion} ${response.status} ${response.statusText}\r\n`;
-    const headers = Object.entries(response.headers)
-      .map(([name, value]) => `${name}: ${value}`)
-      .join("\r\n");
-    const headerBlock = `${statusLine}${headers}\r\n\r\n`;
+
+    const headerLines: string[] = [];
+    for (const [rawName, rawValue] of Object.entries(response.headers)) {
+      const name = rawName.replace(/[\r\n:]+/g, "");
+      if (!name) continue;
+
+      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+      for (const v of values) {
+        const value = String(v).replace(/[\r\n]+/g, " ");
+        headerLines.push(`${name}: ${value}`);
+      }
+    }
+
+    let headerBlock = statusLine;
+    if (headerLines.length > 0) {
+      headerBlock += headerLines.join("\r\n") + "\r\n";
+    }
+    headerBlock += "\r\n";
     write(Buffer.from(headerBlock));
   }
 
@@ -1742,8 +1767,14 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private stripHopByHopHeaders(headers: Record<string, string>) {
-    const connection = headers["connection"];
+  private stripHopByHopHeaders(headers: Record<string, string>): Record<string, string>;
+  private stripHopByHopHeaders(headers: HttpResponseHeaders): HttpResponseHeaders;
+  private stripHopByHopHeaders(headers: Record<string, HeaderValue>): any {
+    const connectionValue = headers["connection"];
+    const connection = Array.isArray(connectionValue)
+      ? connectionValue.join(",")
+      : connectionValue ?? "";
+
     const connectionTokens = new Set<string>();
     if (connection) {
       for (const token of connection.split(",")) {
@@ -1752,7 +1783,7 @@ export class QemuNetworkBackend extends EventEmitter {
       }
     }
 
-    const output: Record<string, string> = {};
+    const output: Record<string, HeaderValue> = {};
     for (const [name, value] of Object.entries(headers)) {
       const normalizedName = name.toLowerCase();
       if (HOP_BY_HOP_HEADERS.has(normalizedName)) continue;
@@ -1762,11 +1793,24 @@ export class QemuNetworkBackend extends EventEmitter {
     return output;
   }
 
-  private headersToRecord(headers: Headers) {
-    const record: Record<string, string> = {};
+  private headersToRecord(headers: Headers): HttpResponseHeaders {
+    const record: HttpResponseHeaders = {};
+
     headers.forEach((value, key) => {
       record[key.toLowerCase()] = value;
     });
+
+    // undici/Node fetch supports multiple Set-Cookie values via getSetCookie().
+    const anyHeaders = headers as unknown as { getSetCookie?: () => string[] };
+    if (typeof anyHeaders.getSetCookie === "function") {
+      const cookies = anyHeaders.getSetCookie();
+      if (cookies.length === 1) {
+        record["set-cookie"] = cookies[0]!;
+      } else if (cookies.length > 1) {
+        record["set-cookie"] = cookies;
+      }
+    }
+
     return record;
   }
 }

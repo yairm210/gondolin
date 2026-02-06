@@ -521,6 +521,61 @@ test("qemu-net: fetchAndRespond streams chunked body when length unknown/encoded
   assert.ok(bodyText.includes("0\r\n\r\n"));
 });
 
+test("qemu-net: fetchAndRespond preserves multiple Set-Cookie headers", async () => {
+  const writes: Buffer[] = [];
+
+  const fetchMock = async () => {
+    return new Response("ok", {
+      status: 200,
+      statusText: "OK",
+      headers: [
+        ["content-length", "2"],
+        ["set-cookie", "a=1"],
+        ["set-cookie", "b=2"],
+      ],
+    });
+  };
+
+  let sawHook = false;
+
+  const backend = makeBackend({
+    fetch: fetchMock as any,
+    httpHooks: {
+      isAllowed: () => true,
+      onResponse: async (resp) => {
+        sawHook = true;
+        assert.ok(Array.isArray(resp.headers["set-cookie"]));
+        assert.deepEqual(resp.headers["set-cookie"], ["a=1", "b=2"]);
+        return resp;
+      },
+    },
+  });
+  (backend as any).resolveHostname = async () => ({ address: "203.0.113.21", family: 4 });
+
+  const request = {
+    method: "GET",
+    target: "/",
+    version: "HTTP/1.1",
+    headers: { host: "example.com" },
+    body: Buffer.alloc(0),
+  };
+
+  await (backend as any).fetchAndRespond(request, "http", (chunk: Buffer) => {
+    writes.push(Buffer.from(chunk));
+  });
+
+  assert.equal(sawHook, true);
+
+  const raw = Buffer.concat(writes).toString("utf8");
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  assert.notEqual(headerEnd, -1);
+  const head = raw.slice(0, headerEnd).toLowerCase();
+
+  // must be emitted as two separate header lines (not a single comma-joined value)
+  assert.ok(head.includes("\r\nset-cookie: a=1\r\n"));
+  assert.ok(head.includes("\r\nset-cookie: b=2\r\n"));
+});
+
 test("qemu-net: fetchAndRespond handles HTTP/1.0 clients correctly (no chunked)", async () => {
   const writes: Buffer[] = [];
 
