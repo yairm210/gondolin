@@ -38,6 +38,7 @@ nav = [
         {"Debug Logging" = "debug.md"},
         {"Custom Images" = "custom-images.md"},
         {"Overlay Root" = "root-overlay.md"},
+        {"Limitations" = "limitations.md"},
     ]},
     {"Architecture" = [
         {"Overview" = "architecture.md"},
