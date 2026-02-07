@@ -38,6 +38,7 @@ nav = [
         {"Overlay Root" = "root-overlay.md"},
     ]},
     {"Architecture" = [
+        {"Overview" = "architecture.md"},
         {"Security Design" = "security.md"},
         {"Network Stack" = "network.md"},
         {"QEMU" = "qemu.md"},
