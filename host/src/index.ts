@@ -56,6 +56,14 @@ export {
 export type { HttpHooks, HttpHookRequest, HttpFetch } from "./qemu-net";
 export { HttpRequestBlockedError } from "./qemu-net";
 
+// Debug helpers
+export {
+  type DebugFlag,
+  type DebugConfig,
+  type DebugComponent,
+  type DebugLogFn,
+} from "./debug";
+
 // Asset management
 export {
   ensureGuestAssets,

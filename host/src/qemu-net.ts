@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import { stripTrailingNewline } from "./debug";
 import net from "net";
 import fs from "fs";
 import fsp from "fs/promises";
@@ -528,6 +529,12 @@ type TlsContextCacheEntry = {
 };
 
 export class QemuNetworkBackend extends EventEmitter {
+  private emitDebug(message: string) {
+    // Structured event for consumers (VM / SandboxServer)
+    this.emit("debug", "net", stripTrailingNewline(message));
+    // Legacy string log event
+    this.emit("log", `[net] ${stripTrailingNewline(message)}`);
+  }
   private server: net.Server | null = null;
   private socket: net.Socket | null = null;
   private waitingDrain = false;
@@ -648,9 +655,8 @@ export class QemuNetworkBackend extends EventEmitter {
       allowTcpFlow: (info) => {
         if (info.protocol !== "http" && info.protocol !== "tls") {
           if (this.options.debug) {
-            this.emit(
-              "log",
-              `[net] tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+            this.emitDebug(
+              `tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
             );
           }
           return false;
@@ -679,7 +685,7 @@ export class QemuNetworkBackend extends EventEmitter {
       this.icmpDebugBuffer = Buffer.alloc(0);
       this.icmpRxBuffer = Buffer.alloc(0);
       this.stack.on("dhcp", (state, ip) => {
-        this.emit("log", `[net] dhcp ${state} ${ip}`);
+        this.emitDebug(`dhcp ${state} ${ip}`);
       });
       this.stack.on("icmp", (info) => {
         this.recordIcmpTiming(info as IcmpTiming);
@@ -695,7 +701,7 @@ export class QemuNetworkBackend extends EventEmitter {
       if (this.options.debug) {
         const now = performance.now();
         this.trackIcmpReplies(chunk, now);
-        this.emit("log", `[net] tx ${chunk.length} bytes to qemu`);
+        this.emitDebug(`tx ${chunk.length} bytes to qemu`);
       }
       const ok = this.socket.write(chunk);
       if (!ok) {
@@ -843,9 +849,8 @@ export class QemuNetworkBackend extends EventEmitter {
       ? `guest_to_host=${guestToHostMs.toFixed(3)}ms `
       : "";
 
-    this.emit(
-      "log",
-      `[net] icmp echo id=${timing.id} seq=${timing.seq} ${timing.srcIP} -> ${timing.dstIP} size=${timing.size} ` +
+    this.emitDebug(
+      `icmp echo id=${timing.id} seq=${timing.seq} ${timing.srcIP} -> ${timing.dstIP} size=${timing.size} ` +
         `${guestToHostLabel}processing=${processingMs.toFixed(3)}ms ` +
         `queued=${queuedMs.toFixed(3)}ms total=${totalMs.toFixed(3)}ms${eventLoopInfo}`
     );
@@ -874,7 +879,9 @@ export class QemuNetworkBackend extends EventEmitter {
   private handleUdpSend(message: UdpSendMessage) {
     if (message.dstPort !== 53) {
       if (this.options.debug) {
-        this.emit("log", `[net] udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`);
+        this.emitDebug(
+          `udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`
+        );
       }
       return;
     }
@@ -893,7 +900,9 @@ export class QemuNetworkBackend extends EventEmitter {
 
       socket.on("message", (data, rinfo) => {
         if (this.options.debug) {
-          this.emit("log", `[net] udp recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)`);
+          this.emitDebug(
+            `udp recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)`
+          );
         }
         this.stack?.handleUdpResponse({
           data: Buffer.from(data),
@@ -911,7 +920,9 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     if (this.options.debug) {
-      this.emit("log", `[net] udp send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`);
+      this.emitDebug(
+        `udp send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`
+      );
     }
     session.socket.send(message.payload, message.dstPort, message.dstIP);
   }
@@ -941,9 +952,8 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private abortTcpSession(key: string, session: TcpSession, reason: string) {
     if (this.options.debug) {
-      this.emit(
-        "log",
-        `[net] tcp session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
+      this.emitDebug(
+        `tcp session aborted ${session.srcIP}:${session.srcPort} -> ${session.dstIP}:${session.dstPort} reason=${reason}`
       );
     }
 
@@ -1106,7 +1116,7 @@ export class QemuNetworkBackend extends EventEmitter {
         this.getTlsContextAsync(sni)
           .then((context) => {
             if (this.options.debug) {
-              this.emit("log", `[net] tls sni ${sni}`);
+              this.emitDebug(`tls sni ${sni}`);
             }
             callback(null, context);
           })
@@ -1137,7 +1147,7 @@ export class QemuNetworkBackend extends EventEmitter {
     };
 
     if (this.options.debug) {
-      this.emit("log", `[net] tls mitm start ${session.dstIP}:${session.dstPort}`);
+      this.emitDebug(`tls mitm start ${session.dstIP}:${session.dstPort}`);
     }
 
     return session.tls;
@@ -1399,7 +1409,7 @@ export class QemuNetworkBackend extends EventEmitter {
       const error = err instanceof Error ? err : new Error(String(err));
       if (error instanceof HttpRequestBlockedError) {
         if (this.options.debug) {
-          this.emit("log", `[net] http blocked ${error.message}`);
+          this.emitDebug(`http blocked ${error.message}`);
         }
         this.respondWithError(options.write, error.status, error.statusText);
       } else {
@@ -1426,7 +1436,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
       if (error instanceof HttpRequestBlockedError) {
         if (this.options.debug) {
-          this.emit("log", `[net] http blocked ${error.message}`);
+          this.emitDebug(`http blocked ${error.message}`);
         }
         this.respondWithError(options.write, error.status, error.statusText, httpVersion);
       } else {
@@ -1814,7 +1824,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
     // XXX: validate URL + DNS/IP to block localhost/private ranges before fetch().
     if (this.options.debug) {
-      this.emit("log", `[net] http bridge ${request.method} ${url}`);
+      this.emitDebug(`http bridge ${request.method} ${url}`);
     }
 
     let hookRequest: HttpHookRequest = {
@@ -1887,7 +1897,7 @@ export class QemuNetworkBackend extends EventEmitter {
         }
 
         if (this.options.debug) {
-          this.emit("log", `[net] http bridge response ${response.status} ${response.statusText}`);
+          this.emitDebug(`http bridge response ${response.status} ${response.statusText}`);
         }
 
         let responseHeaders = this.stripHopByHopHeaders(this.headersToRecord(response.headers));

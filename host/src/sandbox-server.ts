@@ -34,7 +34,15 @@ import {
 } from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
-import { parseDebugEnv } from "./debug";
+import {
+  debugFlagsToArray,
+  parseDebugEnv,
+  resolveDebugFlags,
+  stripTrailingNewline,
+  type DebugComponent,
+  type DebugConfig,
+  type DebugFlag,
+} from "./debug";
 import { ensureGuestAssets, loadAssetManifest, loadGuestAssets, type GuestAssets } from "./assets";
 
 /**
@@ -89,8 +97,17 @@ export type SandboxServerOptions = {
   netMac?: string;
   /** whether to enable networking */
   netEnabled?: boolean;
-  /** whether to enable network debug logging */
-  netDebug?: boolean;
+
+  /**
+   * Debug configuration
+   *
+   * - `true`: enable all debug components
+   * - `false`: disable all debug components
+   * - `string[]`: enable selected components (e.g. `["net", "exec"]`)
+   *
+   * If omitted, defaults to `GONDOLIN_DEBUG`.
+   */
+  debug?: DebugConfig;
   /** qemu machine type */
   machineType?: string;
   /** qemu acceleration backend (e.g. kvm, hvf) */
@@ -147,8 +164,9 @@ export type ResolvedSandboxServerOptions = {
   netMac: string;
   /** whether networking is enabled */
   netEnabled: boolean;
-  /** whether network debug logging is enabled */
-  netDebug: boolean;
+
+  /** enabled debug components */
+  debug: DebugFlag[];
   /** qemu machine type */
   machineType?: string;
   /** qemu acceleration backend (e.g. kvm, hvf) */
@@ -303,7 +321,9 @@ export function resolveSandboxServerOptions(
   const hostArch = detectHostArch();
   const defaultQemu = hostArch === "arm64" ? "qemu-system-aarch64" : "qemu-system-x86_64";
   const defaultMemory = "1G";
-  const debugFlags = parseDebugEnv();
+  const envDebugFlags = parseDebugEnv();
+  const resolvedDebugFlags = resolveDebugFlags(options.debug, envDebugFlags);
+  const debug = debugFlagsToArray(resolvedDebugFlags);
 
   if (!kernelPath || !initrdPath || !rootfsPath) {
     throw new Error(
@@ -350,7 +370,7 @@ export function resolveSandboxServerOptions(
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
-    netDebug: options.netDebug ?? debugFlags.has("net"),
+    debug,
     machineType: options.machineType,
     accel: options.accel,
     cpu: options.cpu,
@@ -681,6 +701,19 @@ function sendError(client: SandboxClient, error: ErrorMessage): boolean {
 }
 
 export class SandboxServer extends EventEmitter {
+  private emitDebug(component: DebugComponent, message: string) {
+    const normalized = stripTrailingNewline(message);
+    this.emit("debug", component, normalized);
+    // Legacy string log event
+    this.emit("log", `[${component}] ${normalized}` + (message.endsWith("\n") ? "\n" : ""));
+  }
+
+  private readonly debugFlags: ReadonlySet<DebugFlag>;
+
+  private hasDebug(flag: DebugFlag) {
+    return this.debugFlags.has(flag);
+  }
+
   private readonly options: ResolvedSandboxServerOptions;
   private readonly controller: SandboxController;
   private readonly bridge: VirtioBridge;
@@ -729,7 +762,7 @@ export class SandboxServer extends EventEmitter {
     super();
     this.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      this.emit("log", `[error] ${message}`);
+      this.emitDebug("error", message);
     });
     // Detect if we received pre-resolved options (from static create())
     // by checking for a field that's required in resolved but computed in unresolved
@@ -743,6 +776,8 @@ export class SandboxServer extends EventEmitter {
     this.options = isResolved
       ? (options as ResolvedSandboxServerOptions)
       : resolveSandboxServerOptions(options as SandboxServerOptions);
+
+    this.debugFlags = new Set(this.options.debug ?? []);
     this.vfsProvider = this.options.vfsProvider
       ? this.options.vfsProvider instanceof SandboxVfsProvider
         ? this.options.vfsProvider
@@ -787,7 +822,7 @@ export class SandboxServer extends EventEmitter {
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
     this.fsService = this.vfsProvider
       ? new FsRpcService(this.vfsProvider, {
-          logger: (message) => this.emit("log", message),
+          logger: this.hasDebug("vfs") ? (message) => this.emitDebug("vfs", message) : undefined,
         })
       : null;
 
@@ -796,7 +831,7 @@ export class SandboxServer extends EventEmitter {
       ? new QemuNetworkBackend({
           socketPath: this.options.netSocketPath,
           vmMac: mac,
-          debug: this.options.netDebug,
+          debug: this.hasDebug("net"),
           fetch: this.options.fetch,
           httpHooks: this.options.httpHooks,
           mitmCertDir: this.options.mitmCertDir,
@@ -806,8 +841,8 @@ export class SandboxServer extends EventEmitter {
       : null;
 
     if (this.network) {
-      this.network.on("log", (message: string) => {
-        this.emit("log", message);
+      this.network.on("debug", (component: DebugComponent, message: string) => {
+        this.emitDebug(component, message);
       });
       this.network.on("error", (err) => {
         this.emit("error", err);
@@ -846,7 +881,9 @@ export class SandboxServer extends EventEmitter {
 
     this.controller.on("exit", (info) => {
       if (this.qemuLogBuffer.length > 0) {
-        this.emit("log", `[qemu] ${this.qemuLogBuffer}`);
+        if (this.hasDebug("protocol")) {
+          this.emitDebug("qemu", this.qemuLogBuffer);
+        }
         this.qemuLogBuffer = "";
       }
       this.failInflight("sandbox_stopped", "sandbox exited");
@@ -859,12 +896,24 @@ export class SandboxServer extends EventEmitter {
       while (newlineIndex !== -1) {
         const line = this.qemuLogBuffer.slice(0, newlineIndex + 1);
         this.qemuLogBuffer = this.qemuLogBuffer.slice(newlineIndex + 1);
-        this.emit("log", `[qemu] ${line}`);
+        if (this.hasDebug("protocol")) {
+          this.emitDebug("qemu", line);
+        }
         newlineIndex = this.qemuLogBuffer.indexOf("\n");
       }
     });
 
     this.bridge.onMessage = (message) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra =
+          message.t === "exec_output"
+            ? ` stream=${(message as any).p?.stream} bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+            : message.t === "exec_response"
+              ? ` exit=${(message as any).p?.exit_code}`
+              : "";
+        this.emitDebug("protocol", `virtio rx t=${message.t} id=${id}${extra}`);
+      }
       if (!isValidRequestId(message.id)) {
         return;
       }
@@ -883,6 +932,12 @@ export class SandboxServer extends EventEmitter {
           this.stdinAllowed.delete(message.id);
         }
       } else if (message.t === "exec_response") {
+        if (this.hasDebug("exec")) {
+          this.emitDebug(
+            "exec",
+            `exec done id=${message.id} exit=${message.p.exit_code}${message.p.signal ? ` signal=${message.p.signal}` : ""}`
+          );
+        }
         const client = this.inflight.get(message.id);
         if (client) {
           sendJson(client, {
@@ -914,6 +969,11 @@ export class SandboxServer extends EventEmitter {
     };
 
     this.fsBridge.onMessage = (message) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra = message.t === "fs_request" ? ` op=${(message as any).p?.op}` : "";
+        this.emitDebug("protocol", `virtiofs rx t=${message.t} id=${id}${extra}`);
+      }
       if (!isValidRequestId(message.id)) {
         return;
       }
@@ -1015,6 +1075,9 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleVfsReady() {
+    if (this.hasDebug("vfs")) {
+      this.emitDebug("vfs", "vfs_ready");
+    }
     if (this.vfsReady) return;
     this.vfsReady = true;
     this.clearVfsReadyTimer();
@@ -1025,6 +1088,9 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleVfsError(message: string, code = "vfs_error") {
+    if (this.hasDebug("vfs")) {
+      this.emitDebug("vfs", `vfs_error code=${code} message=${stripTrailingNewline(message)}`);
+    }
     this.vfsReady = false;
     this.clearVfsReadyTimer();
     const trimmed = message.trim();
@@ -1123,6 +1189,21 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleClientMessage(client: SandboxClient, message: ClientMessage) {
+    if (this.hasDebug("protocol")) {
+      const extra =
+        message.type === "exec"
+          ? ` id=${message.id} cmd=${message.cmd}`
+          : message.type === "stdin"
+            ? ` id=${message.id} bytes=${message.data ? Math.floor((message.data.length * 3) / 4) : 0}${message.eof ? " eof" : ""}`
+            : message.type === "pty_resize"
+              ? ` id=${message.id} rows=${message.rows} cols=${message.cols}`
+              : message.type === "boot"
+                ? ` fuseMount=${(message as any).fuseMount ?? ""} binds=${Array.isArray((message as any).fuseBinds) ? (message as any).fuseBinds.length : 0}`
+                : message.type === "lifecycle"
+                  ? ` action=${(message as any).action}`
+                  : "";
+      this.emitDebug("protocol", `client rx type=${message.type}${extra}`);
+    }
     if (message.type === "boot") {
       void this.handleBoot(client, message);
       return;
@@ -1194,6 +1275,17 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleExec(client: SandboxClient, message: ExecCommandMessage) {
+    if (this.hasDebug("exec")) {
+      const envKeys = (message.env ?? [])
+        .map((entry) => String(entry).split("=", 1)[0])
+        .filter((k) => k && k.length > 0);
+      const cwd = message.cwd ? ` cwd=${message.cwd}` : "";
+      const argv = (message.argv ?? []).length > 0 ? ` argv=${JSON.stringify(message.argv)}` : "";
+      const env = envKeys.length > 0 ? ` envKeys=${JSON.stringify(envKeys)}` : "";
+      const stdin = message.stdin ? " stdin" : "";
+      const pty = message.pty ? " pty" : "";
+      this.emitDebug("exec", `exec start id=${message.id} cmd=${message.cmd}${cwd}${argv}${env}${stdin}${pty}`);
+    }
     if (!isValidRequestId(message.id) || !message.cmd) {
       sendError(client, {
         type: "error",
@@ -1238,6 +1330,10 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handleStdin(client: SandboxClient, message: StdinCommandMessage) {
+    if (this.hasDebug("exec")) {
+      const bytes = message.data ? estimateBase64Bytes(message.data) : 0;
+      this.emitDebug("exec", `stdin id=${message.id} bytes=${bytes}${message.eof ? " eof" : ""}`);
+    }
     if (!isValidRequestId(message.id)) {
       sendError(client, {
         type: "error",
@@ -1300,6 +1396,9 @@ export class SandboxServer extends EventEmitter {
   }
 
   private handlePtyResize(client: SandboxClient, message: PtyResizeCommandMessage) {
+    if (this.hasDebug("exec")) {
+      this.emitDebug("exec", `pty_resize id=${message.id} rows=${message.rows} cols=${message.cols}`);
+    }
     if (!isValidRequestId(message.id)) {
       sendError(client, {
         type: "error",

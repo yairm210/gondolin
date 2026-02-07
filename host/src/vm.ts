@@ -23,7 +23,7 @@ import {
   type VfsHooks,
 } from "./vfs";
 import { loadOrCreateMitmCaSync, resolveMitmCertDir } from "./mitm";
-import { parseDebugEnv } from "./debug";
+import { defaultDebugLog, resolveDebugFlags, type DebugComponent, type DebugLogFn } from "./debug";
 import {
   MountRouterProvider,
   listMountPaths,
@@ -56,10 +56,6 @@ const VFS_READY_ATTEMPTS = Math.max(
   Math.ceil(VFS_READY_TIMEOUT_MS / (VFS_READY_SLEEP_SECONDS * 1000))
 );
 
-function formatLog(message: string) {
-  if (message.endsWith("\n")) return message;
-  return `${message}\n`;
-}
 
 function resolveEnvNumber(name: string, fallback: number) {
   const raw = process.env[name];
@@ -105,6 +101,17 @@ export type VMOptions = {
   memory?: string;
   /** vm cpu count (default: 2) */
   cpus?: number;
+
+  /**
+   * Debug log callback.
+   *
+   * If any debug mode is enabled (via `server.debug` or `GONDOLIN_DEBUG`),
+   * debug messages are delivered here.
+   *
+   * - `undefined`: defaults to `console.log` with `[component]` prefix
+   * - `null`: disable debug output even if debug modes are enabled
+   */
+  debugLog?: DebugLogFn | null;
 };
 
 export type ShellOptions = {
@@ -126,6 +133,14 @@ export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 export type VMState = SandboxState | "unknown";
 
 export class VM {
+  /**
+   * Replace the debug log callback.
+   *
+   * Passing `null` disables debug output.
+   */
+  setDebugLog(callback: DebugLogFn | null) {
+    this.debugLog = callback;
+  }
   private readonly autoStart: boolean;
   private server: SandboxServer | null;
   private readonly defaultEnv: EnvInput | undefined;
@@ -149,6 +164,8 @@ export class VM {
   private readonly fuseBinds: string[];
   private bootSent = false;
   private vfsReadyPromise: Promise<void> | null = null;
+  private debugLog: DebugLogFn | null = null;
+  private debugListener: ((component: DebugComponent, message: string) => void) | null = null;
 
   /**
    * Create a VM instance, downloading guest assets if needed.
@@ -269,12 +286,6 @@ export class VM {
       serverOptions.cpus = options.cpus;
     }
 
-    const debugFlags = parseDebugEnv();
-    const netDebug = serverOptions.netDebug ?? debugFlags.has("net");
-    if (netDebug !== undefined) {
-      serverOptions.netDebug = netDebug;
-    }
-
     // Handle VFS in resolved options
     if (resolvedServerOptions) {
       // Merge VFS provider into resolved options
@@ -285,14 +296,28 @@ export class VM {
     } else {
       this.server = new SandboxServer(serverOptions);
     }
-    if (netDebug) {
-      this.server.on("log", (message: string) => {
-        process.stderr.write(formatLog(message));
-      });
-      this.server.on("error", (err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        process.stderr.write(formatLog(message));
-      });
+
+    const effectiveDebugFlags = resolvedServerOptions
+      ? new Set(resolvedServerOptions.debug ?? [])
+      : resolveDebugFlags(serverOptions.debug);
+
+    const anyDebug = effectiveDebugFlags.size > 0;
+
+    if (anyDebug) {
+      // If the user didn't provide a debug sink, default to console.log
+      this.debugLog = options.debugLog === undefined ? defaultDebugLog : options.debugLog;
+
+      // Always attach the listener so `vm.setDebugLog()` can enable logging later.
+      this.debugListener = (component, message) => {
+        const logger = this.debugLog;
+        if (!logger) return;
+        try {
+          logger(component, message);
+        } catch {
+          // ignore logger errors
+        }
+      };
+      this.server.on("debug", this.debugListener);
     }
   }
 

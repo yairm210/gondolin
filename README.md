@@ -61,6 +61,11 @@ QEMU and Node installed:
 - **Fast.** Boots quickly, optimized for LLM workflows that spin up, execute, and tear down frequently.
 - **Familiar environment.** A real Linux VM that LLMs know how to use.
 
+## Documentation
+
+- [`docs/index.md`](docs/index.md) — additional guides (debug logging, custom images, ...)
+- [`host/README.md`](host/README.md) — TypeScript API reference
+
 ## Programmable Filesystem
 
 The VFS layer lets you control what the guest sees. Mount in-memory filesystems,
