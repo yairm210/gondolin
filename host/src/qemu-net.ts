@@ -3408,6 +3408,12 @@ export class QemuNetworkBackend extends EventEmitter {
       if (!isNonNegativeSerialNumberHex(cert.serialNumber)) {
         throw new Error("persisted mitm leaf cert has an unsafe serial number");
       }
+      if (!caCertVerifiesLeaf(ca.cert, cert)) {
+        throw new Error("persisted mitm leaf cert is not signed by current ca");
+      }
+      if (!privateKeyMatchesLeafCert(keyPem, cert)) {
+        throw new Error("persisted mitm leaf key does not match cert");
+      }
       return { keyPem, certPem };
     } catch {
       // Generate new leaf certificate
@@ -3619,6 +3625,27 @@ function normalizeLookupOptions(
 
 function normalizeLookupFailure(options: dns.LookupOneOptions | dns.LookupAllOptions): LookupResult {
   return options.all ? [] : "";
+}
+
+function caCertVerifiesLeaf(caCert: forge.pki.Certificate, leafCert: forge.pki.Certificate): boolean {
+  try {
+    return caCert.verify(leafCert);
+  } catch {
+    return false;
+  }
+}
+
+function privateKeyMatchesLeafCert(keyPem: string, leafCert: forge.pki.Certificate): boolean {
+  try {
+    const privateKey = forge.pki.privateKeyFromPem(keyPem) as forge.pki.rsa.PrivateKey;
+    const publicKey = leafCert.publicKey as forge.pki.rsa.PublicKey;
+    return (
+      privateKey.n.toString(16) === publicKey.n.toString(16) &&
+      privateKey.e.toString(16) === publicKey.e.toString(16)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function getUrlProtocol(url: URL): "http" | "https" | null {
