@@ -37,6 +37,7 @@ nav = [
         {"CLI" = "cli.md"},
         {"Listening" = "ingress.md"},
         {"TypeScript SDK" = "sdk.md"},
+        {"Secrets Handling" = "secrets.md"},
         {"SSH" = "ssh.md"},
         {"Debug Logging" = "debug.md"},
     ]},

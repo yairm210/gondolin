@@ -66,6 +66,7 @@ await vm.close();
 - [CLI](./cli.md): run interactive shells and commands inside a micro-VM
 - [Ingress](./ingress.md): expose guest HTTP servers on the host
 - [TypeScript SDK](./sdk.md): programmatic control via the TypeScript/JavaScript API
+- [Secrets Handling](./secrets.md): placeholder-based secret injection and host allowlists
 - [SSH](./ssh.md): enable SSH access to the guest with safe defaults
 - [Debug Logging](./debug.md): how to enable and interpret debug logging
 
