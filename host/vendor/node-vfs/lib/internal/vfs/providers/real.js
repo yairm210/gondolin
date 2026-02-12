@@ -311,6 +311,18 @@ class RealFSProvider extends VirtualProvider {
     return fs.promises.rename(oldRealPath, newRealPath);
   }
 
+  linkSync(existingVfsPath, newVfsPath) {
+    const existingRealPath = this._resolvePath(existingVfsPath);
+    const newRealPath = this._resolvePath(newVfsPath);
+    fs.linkSync(existingRealPath, newRealPath);
+  }
+
+  async link(existingVfsPath, newVfsPath) {
+    const existingRealPath = this._resolvePath(existingVfsPath);
+    const newRealPath = this._resolvePath(newVfsPath);
+    return fs.promises.link(existingRealPath, newRealPath);
+  }
+
   readlinkSync(vfsPath, options) {
     const realPath = this._resolvePath(vfsPath);
     return fs.readlinkSync(realPath, options);

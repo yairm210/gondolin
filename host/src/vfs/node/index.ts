@@ -65,6 +65,8 @@ export type VirtualProvider = {
   unlinkSync(path: string): void;
   rename(oldPath: string, newPath: string): Promise<void>;
   renameSync(oldPath: string, newPath: string): void;
+  link?(existingPath: string, newPath: string): Promise<void>;
+  linkSync?(existingPath: string, newPath: string): void;
   readFile?(path: string, options?: { encoding?: BufferEncoding } | BufferEncoding): Promise<Buffer | string>;
   readFileSync?(path: string, options?: { encoding?: BufferEncoding } | BufferEncoding): Buffer | string;
   writeFile?(path: string, data: Buffer | string, options?: { encoding?: BufferEncoding; mode?: number }): Promise<void>;

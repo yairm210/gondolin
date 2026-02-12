@@ -50,6 +50,10 @@ test("RealFSProvider proxies filesystem operations (sync + async)", async (t) =>
   provider.renameSync("/dir/hello.txt", "/dir/renamed.txt");
   provider.accessSync("/dir/renamed.txt", fs.constants.R_OK);
 
+  // hard link
+  provider.linkSync("/dir/renamed.txt", "/dir/linked.txt");
+  assert.equal(provider.statSync("/dir/renamed.txt").nlink, 2);
+
   // truncate via file handle
   {
     const fh = await provider.open("/dir/renamed.txt", "r+");
@@ -63,6 +67,7 @@ test("RealFSProvider proxies filesystem operations (sync + async)", async (t) =>
   }
 
   // unlink + rmdir (async)
+  await provider.unlink("/dir/linked.txt");
   await provider.unlink("/dir/renamed.txt");
   await provider.rmdir("/dir/sub");
   await provider.rmdir("/dir");

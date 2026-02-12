@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { FsRpcService, MemoryProvider, MAX_RPC_DATA } from "../src/vfs";
+import { FsRpcService, MemoryProvider, RealFSProvider, MAX_RPC_DATA } from "../src/vfs";
 
 const { errno: ERRNO } = os.constants;
 
@@ -248,6 +250,177 @@ test("fs rpc rename across dirs preserves ino and updates mapping", async () => 
   assert.equal(trunc.p.err, 0);
 
   await service.close();
+});
+
+test("fs rpc rename over existing target clears replaced inode mapping", async () => {
+  const service = createService();
+
+  await send(service, "create", { parent_ino: 1, name: "a.txt", mode: 0o644, flags: 0 });
+  await send(service, "create", { parent_ino: 1, name: "b.txt", mode: 0o644, flags: 0 });
+
+  const lookupA = await send(service, "lookup", { parent_ino: 1, name: "a.txt" });
+  const inoA = (lookupA.p.res?.entry as any).ino as number;
+  const lookupB = await send(service, "lookup", { parent_ino: 1, name: "b.txt" });
+  const inoB = (lookupB.p.res?.entry as any).ino as number;
+
+  const renamed = await send(service, "rename", {
+    old_parent_ino: 1,
+    old_name: "a.txt",
+    new_parent_ino: 1,
+    new_name: "b.txt",
+    flags: 0,
+  });
+  assert.equal(renamed.p.err, 0);
+
+  const lookupRenamed = await send(service, "lookup", { parent_ino: 1, name: "b.txt" });
+  assert.equal(lookupRenamed.p.err, 0);
+  assert.equal((lookupRenamed.p.res?.entry as any).ino, inoA);
+
+  const replacedGetattr = await send(service, "getattr", { ino: inoB });
+  assert.equal(replacedGetattr.p.err, ERRNO.ENOENT);
+
+  await service.close();
+});
+
+test("fs rpc link returns ENOSYS when provider lacks hard-link support", async () => {
+  const service = createService();
+
+  const created = await send(service, "create", {
+    parent_ino: 1,
+    name: "origin.txt",
+    mode: 0o644,
+    flags: 0,
+  });
+  const fh = created.p.res?.fh as number;
+  await send(service, "write", { fh, offset: 0, data: Buffer.from("hello") });
+  await send(service, "release", { fh });
+
+  const lookup = await send(service, "lookup", { parent_ino: 1, name: "origin.txt" });
+  const oldIno = (lookup.p.res?.entry as any).ino as number;
+
+  const linked = await send(service, "link", {
+    old_ino: oldIno,
+    new_parent_ino: 1,
+    new_name: "linked.txt",
+  });
+  assert.equal(linked.p.err, ERRNO.ENOSYS);
+
+  await service.close();
+});
+
+test("fs rpc link creates hard links with RealFSProvider", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gondolin-fs-rpc-link-"));
+  const service = new FsRpcService(new RealFSProvider(tempDir));
+
+  try {
+    const created = await send(service, "create", {
+      parent_ino: 1,
+      name: "origin.txt",
+      mode: 0o644,
+      flags: 0,
+    });
+    assert.equal(created.p.err, 0);
+    const fh = created.p.res?.fh as number;
+
+    const write = await send(service, "write", {
+      fh,
+      offset: 0,
+      data: Buffer.from("hello"),
+    });
+    assert.equal(write.p.err, 0);
+    await send(service, "release", { fh });
+
+    const lookup = await send(service, "lookup", { parent_ino: 1, name: "origin.txt" });
+    assert.equal(lookup.p.err, 0);
+    const oldIno = (lookup.p.res?.entry as any).ino as number;
+
+    const linked = await send(service, "link", {
+      old_ino: oldIno,
+      new_parent_ino: 1,
+      new_name: "linked.txt",
+    });
+    assert.equal(linked.p.err, 0);
+
+    const hostStats = await fs.lstat(path.join(tempDir, "origin.txt"));
+    assert.equal(hostStats.nlink, 2);
+
+    const linkedLookup = await send(service, "lookup", { parent_ino: 1, name: "linked.txt" });
+    assert.equal(linkedLookup.p.err, 0);
+    const linkedIno = (linkedLookup.p.res?.entry as any).ino as number;
+    assert.equal(linkedIno, oldIno);
+
+    const linkedOpen = await send(service, "open", { ino: linkedIno, flags: LINUX_OPEN_FLAGS.O_RDONLY });
+    assert.equal(linkedOpen.p.err, 0);
+    const linkedFh = linkedOpen.p.res?.fh as number;
+    const linkedRead = await send(service, "read", { fh: linkedFh, offset: 0, size: 5 });
+    assert.equal(linkedRead.p.err, 0);
+    assert.equal(Buffer.from(linkedRead.p.res?.data as Buffer).toString("utf8"), "hello");
+    await send(service, "release", { fh: linkedFh });
+
+    const unlinkOrigin = await send(service, "unlink", { parent_ino: 1, name: "origin.txt" });
+    assert.equal(unlinkOrigin.p.err, 0);
+
+    const stillLinked = await send(service, "lookup", { parent_ino: 1, name: "linked.txt" });
+    assert.equal(stillLinked.p.err, 0);
+
+    const getattrLinked = await send(service, "getattr", { ino: oldIno });
+    assert.equal(getattrLinked.p.err, 0);
+  } finally {
+    await service.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("fs rpc symlink returns ENOSYS when provider lacks symlink support", async () => {
+  const base = new MemoryProvider();
+  const provider = new Proxy(base as any, {
+    get(target, prop, receiver) {
+      if (prop === "symlink") {
+        return undefined;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  const service = new FsRpcService(provider);
+
+  const linked = await send(service, "symlink", {
+    parent_ino: 1,
+    name: "python",
+    target: "/usr/bin/python",
+  });
+  assert.equal(linked.p.err, ERRNO.ENOSYS);
+
+  await service.close();
+});
+
+test("fs rpc symlink creates symbolic links with RealFSProvider", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gondolin-fs-rpc-symlink-"));
+  const service = new FsRpcService(new RealFSProvider(tempDir));
+
+  try {
+    await fs.writeFile(path.join(tempDir, "target.txt"), "ok");
+
+    const linked = await send(service, "symlink", {
+      parent_ino: 1,
+      name: "python",
+      target: "target.txt",
+    });
+    assert.equal(linked.p.err, 0);
+
+    const hostTarget = await fs.readlink(path.join(tempDir, "python"));
+    assert.equal(hostTarget, "target.txt");
+
+    const lookup = await send(service, "lookup", { parent_ino: 1, name: "python" });
+    assert.equal(lookup.p.err, 0);
+    const ino = (lookup.p.res?.entry as any).ino as number;
+
+    const readlink = await send(service, "readlink", { ino });
+    assert.equal(readlink.p.err, 0);
+    assert.equal(readlink.p.res?.target, "target.txt");
+  } finally {
+    await service.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("fs rpc open flags: O_CREAT rejected; O_TRUNC truncates; O_APPEND appends", async () => {

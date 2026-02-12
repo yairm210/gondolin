@@ -343,6 +343,32 @@ export class SandboxVfsProvider extends VirtualProviderClass implements VirtualP
     this.runAfterSync({ op: "rename", oldPath, newPath });
   }
 
+  async link(oldPath: string, newPath: string) {
+    if (this.readonly) {
+      throw createErrnoError(ERRNO.EROFS, "link", newPath);
+    }
+    await this.runBefore({ op: "link", oldPath, newPath });
+    if (this.backend.link) {
+      await this.backend.link(oldPath, newPath);
+      await this.runAfter({ op: "link", oldPath, newPath });
+      return;
+    }
+    throw createErrnoError(ERRNO.ENOSYS, "link", oldPath);
+  }
+
+  linkSync(oldPath: string, newPath: string) {
+    if (this.readonly) {
+      throw createErrnoError(ERRNO.EROFS, "link", newPath);
+    }
+    this.runBeforeSync({ op: "link", oldPath, newPath });
+    if (this.backend.linkSync) {
+      this.backend.linkSync(oldPath, newPath);
+      this.runAfterSync({ op: "link", oldPath, newPath });
+      return;
+    }
+    throw createErrnoError(ERRNO.ENOSYS, "link", oldPath);
+  }
+
   async readlink(path: string, options?: object) {
     if (this.backend.readlink) {
       return this.backend.readlink(path, options);

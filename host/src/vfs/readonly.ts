@@ -94,6 +94,14 @@ export class ReadonlyProvider extends VirtualProviderClass implements VirtualPro
     throw createErrnoError(ERRNO.EROFS, "rename", oldPath);
   }
 
+  async link(_existingPath: string, newPath: string): Promise<void> {
+    throw createErrnoError(ERRNO.EROFS, "link", newPath);
+  }
+
+  linkSync(_existingPath: string, newPath: string): void {
+    throw createErrnoError(ERRNO.EROFS, "link", newPath);
+  }
+
   async readlink(path: string, options?: object): Promise<string> {
     if (this.backend.readlink) {
       return this.backend.readlink(path, options);

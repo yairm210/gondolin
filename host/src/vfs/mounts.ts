@@ -239,6 +239,22 @@ export class MountRouterProvider extends VirtualProviderClass implements Virtual
     return resolved.provider.renameSync(resolved.fromPath, resolved.toPath);
   }
 
+  async link(existingPath: string, newPath: string) {
+    const resolved = this.requireSameMount(existingPath, newPath, "link");
+    if (resolved.provider.link) {
+      return resolved.provider.link(resolved.fromPath, resolved.toPath);
+    }
+    throw createErrnoError(ERRNO.ENOSYS, "link", existingPath);
+  }
+
+  linkSync(existingPath: string, newPath: string) {
+    const resolved = this.requireSameMount(existingPath, newPath, "link");
+    if (resolved.provider.linkSync) {
+      return resolved.provider.linkSync(resolved.fromPath, resolved.toPath);
+    }
+    throw createErrnoError(ERRNO.ENOSYS, "link", existingPath);
+  }
+
   async readlink(entryPath: string, options?: object) {
     const mount = this.requireMount(entryPath, "readlink");
     if (mount.provider.readlink) {

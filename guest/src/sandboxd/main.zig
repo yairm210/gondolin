@@ -86,17 +86,32 @@ const ExecSession = struct {
     stdin_queued_bytes: usize = 0,
     done: bool = false,
     thread: ?std.Thread = null,
+    wake_read_fd: ?std.posix.fd_t = null,
+    wake_write_fd: ?std.posix.fd_t = null,
 
-    fn init(allocator: std.mem.Allocator, tx: *VirtioTx, req: OwnedExecRequest) ExecSession {
+    fn init(allocator: std.mem.Allocator, tx: *VirtioTx, req: OwnedExecRequest) !ExecSession {
+        const wake_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+
         return .{
             .allocator = allocator,
             .tx = tx,
             .req = req,
             .controls = .empty,
+            .wake_read_fd = wake_pipe[0],
+            .wake_write_fd = wake_pipe[1],
         };
     }
 
     fn deinit(self: *ExecSession) void {
+        if (self.wake_read_fd) |fd| {
+            std.posix.close(fd);
+            self.wake_read_fd = null;
+        }
+        if (self.wake_write_fd) |fd| {
+            std.posix.close(fd);
+            self.wake_write_fd = null;
+        }
+
         for (self.controls.items) |msg| {
             switch (msg) {
                 .stdin => |chunk| self.allocator.free(chunk.data),
@@ -155,6 +170,32 @@ fn markSessionDone(session: *ExecSession) void {
     session.done = true;
     session.control_cv.broadcast();
     session.mutex.unlock();
+}
+
+fn notifyExecWorker(session: *ExecSession) void {
+    const fd = session.wake_write_fd orelse return;
+    const byte: [1]u8 = .{1};
+
+    while (true) {
+        _ = std.posix.write(fd, &byte) catch |err| switch (err) {
+            error.WouldBlock, error.BrokenPipe => return,
+            else => return,
+        };
+        return;
+    }
+}
+
+fn drainExecWakeFd(fd: std.posix.fd_t) void {
+    var buffer: [64]u8 = undefined;
+
+    while (true) {
+        const n = std.posix.read(fd, &buffer) catch |err| switch (err) {
+            error.WouldBlock => return,
+            else => return,
+        };
+
+        if (n == 0) return;
+    }
 }
 
 pub fn main() !void {
@@ -342,7 +383,7 @@ fn startExecSession(
     const session = try allocator.create(ExecSession);
     errdefer allocator.destroy(session);
 
-    session.* = ExecSession.init(allocator, tx, owned_opt.?);
+    session.* = try ExecSession.init(allocator, tx, owned_opt.?);
     owned_opt = null;
     errdefer session.deinit();
 
@@ -384,6 +425,7 @@ fn enqueueExecInput(session: *ExecSession, input: protocol.InputMessage) !void {
     }
 
     session.control_cv.signal();
+    notifyExecWorker(session);
 }
 
 fn cleanupFinishedExecSessions(
@@ -877,10 +919,11 @@ fn runExecSession(session: *ExecSession) !void {
 
         if (status != null and !stdout_open and !stderr_open) break;
 
-        var pollfds: [2]std.posix.pollfd = undefined;
+        var pollfds: [3]std.posix.pollfd = undefined;
         var nfds: usize = 0;
         var stdout_index: ?usize = null;
         var stderr_index: ?usize = null;
+        var wake_index: ?usize = null;
 
         const stdout_can_read = stdout_credit > 0;
         const stderr_can_read = stderr_credit > 0;
@@ -957,6 +1000,12 @@ fn runExecSession(session: *ExecSession) !void {
             }
         }
 
+        if (session.wake_read_fd) |wake_fd| {
+            wake_index = nfds;
+            pollfds[nfds] = .{ .fd = wake_fd, .events = std.posix.POLL.IN, .revents = 0 };
+            nfds += 1;
+        }
+
         if (nfds > 0) {
             _ = try std.posix.poll(pollfds[0..nfds], 100);
         } else {
@@ -977,6 +1026,13 @@ fn runExecSession(session: *ExecSession) !void {
                 session.mutex.unlock();
             }
             continue;
+        }
+
+        if (wake_index) |windex| {
+            const revents = pollfds[windex].revents;
+            if ((revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+                drainExecWakeFd(pollfds[windex].fd);
+            }
         }
 
         if (stdout_index) |sindex| {

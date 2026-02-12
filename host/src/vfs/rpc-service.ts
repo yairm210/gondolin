@@ -57,7 +57,7 @@ export class FsRpcService {
   private nextIno = 2;
   private nextHandle = 1;
   private readonly pathToIno = new Map<string, number>();
-  private readonly inoToPath = new Map<number, string>();
+  private readonly inoToPaths = new Map<number, Set<string>>();
   private readonly handles = new Map<number, HandleEntry>();
   private readonly logger?: (message: string) => void;
   readonly metrics: FsRpcMetrics = {
@@ -71,7 +71,7 @@ export class FsRpcService {
   constructor(private readonly provider: VirtualProvider, options: FsRpcServiceOptions = {}) {
     this.logger = options.logger;
     this.pathToIno.set("/", 1);
-    this.inoToPath.set(1, "/");
+    this.inoToPaths.set(1, new Set(["/"]));
   }
 
   async handleRequest(message: FsRequest): Promise<FsResponse> {
@@ -127,6 +127,8 @@ export class FsRpcService {
         return this.handleLookup(req);
       case "getattr":
         return this.handleGetattr(req);
+      case "readlink":
+        return this.handleReadlink(req);
       case "readdir":
         return this.handleReaddir(req);
       case "open":
@@ -139,10 +141,14 @@ export class FsRpcService {
         return this.handleCreate(req);
       case "mkdir":
         return this.handleMkdir(req);
+      case "symlink":
+        return this.handleSymlink(req);
       case "unlink":
         return this.handleUnlink(req);
       case "rename":
         return this.handleRename(req);
+      case "link":
+        return this.handleLink(req);
       case "truncate":
         return this.handleTruncate(req);
       case "release":
@@ -181,6 +187,18 @@ export class FsRpcService {
       attr: statsToAttr(ino, stats),
       attr_ttl_ms: DEFAULT_ATTR_TTL_MS,
     };
+  }
+
+  private async handleReadlink(req: Record<string, unknown>) {
+    const ino = requireUint(req.ino, "readlink", "ino");
+    const entryPath = this.requirePath(ino, "readlink");
+    const provider = this.provider as { readlink?: (path: string, options?: object) => Promise<string> };
+    if (typeof provider.readlink !== "function") {
+      throw createErrnoError(ERRNO.ENOSYS, "readlink", entryPath);
+    }
+
+    const target = await provider.readlink(entryPath);
+    return { target };
   }
 
   private async handleReaddir(req: Record<string, unknown>) {
@@ -329,6 +347,36 @@ export class FsRpcService {
     };
   }
 
+  private async handleSymlink(req: Record<string, unknown>) {
+    const parentIno = requireUint(req.parent_ino, "symlink", "parent_ino");
+    const name = requireString(req.name, "symlink", "name");
+    const target = requireString(req.target, "symlink", "target");
+    validateName(name, "symlink");
+
+    const parentPath = this.requirePath(parentIno, "symlink");
+    const entryPath = normalizePath(path.posix.join(parentPath, name));
+
+    const provider = this.provider as {
+      symlink?: (target: string, path: string, type?: string) => Promise<void>;
+    };
+    if (typeof provider.symlink !== "function") {
+      throw createErrnoError(ERRNO.ENOSYS, "symlink", entryPath);
+    }
+
+    await provider.symlink(target, entryPath);
+    const stats = await this.provider.lstat(entryPath);
+    const ino = this.ensureIno(entryPath);
+
+    return {
+      entry: {
+        ino,
+        attr: statsToAttr(ino, stats),
+        attr_ttl_ms: DEFAULT_ATTR_TTL_MS,
+        entry_ttl_ms: DEFAULT_ENTRY_TTL_MS,
+      },
+    };
+  }
+
   private async handleUnlink(req: Record<string, unknown>) {
     const parentIno = requireUint(req.parent_ino, "unlink", "parent_ino");
     const name = requireString(req.name, "unlink", "name");
@@ -360,6 +408,35 @@ export class FsRpcService {
     await this.provider.rename(oldPath, newPath);
     this.renameMapping(oldPath, newPath);
     return {};
+  }
+
+  private async handleLink(req: Record<string, unknown>) {
+    const oldIno = requireUint(req.old_ino, "link", "old_ino");
+    const newParentIno = requireUint(req.new_parent_ino, "link", "new_parent_ino");
+    const newName = requireString(req.new_name, "link", "new_name");
+    validateName(newName, "link");
+
+    const oldPath = this.requirePath(oldIno, "link");
+    const newParentPath = this.requirePath(newParentIno, "link");
+    const newPath = normalizePath(path.posix.join(newParentPath, newName));
+
+    const provider = this.provider as { link?: (existingPath: string, newPath: string) => Promise<void> };
+    if (typeof provider.link !== "function") {
+      throw createErrnoError(ERRNO.ENOSYS, "link", oldPath);
+    }
+
+    await provider.link(oldPath, newPath);
+    const stats = await this.provider.stat(newPath);
+    const ino = this.ensureIno(newPath, oldIno);
+
+    return {
+      entry: {
+        ino,
+        attr: statsToAttr(ino, stats),
+        attr_ttl_ms: DEFAULT_ATTR_TTL_MS,
+        entry_ttl_ms: DEFAULT_ENTRY_TTL_MS,
+      },
+    };
   }
 
   private async handleTruncate(req: Record<string, unknown>) {
@@ -428,18 +505,26 @@ export class FsRpcService {
     }
   }
 
-  private ensureIno(entryPath: string) {
+  private ensureIno(entryPath: string, preferredIno?: number) {
     const normalized = normalizePath(entryPath);
     const existing = this.pathToIno.get(normalized);
     if (existing) return existing;
-    const ino = this.nextIno++;
+
+    const ino = preferredIno ?? this.nextIno++;
     this.pathToIno.set(normalized, ino);
-    this.inoToPath.set(ino, normalized);
+
+    let paths = this.inoToPaths.get(ino);
+    if (!paths) {
+      paths = new Set();
+      this.inoToPaths.set(ino, paths);
+    }
+    paths.add(normalized);
     return ino;
   }
 
   private requirePath(ino: number, op: string) {
-    const entryPath = this.inoToPath.get(ino);
+    const paths = this.inoToPaths.get(ino);
+    const entryPath = paths?.values().next().value as string | undefined;
     if (!entryPath) {
       throw createErrnoError(ERRNO.ENOENT, op);
     }
@@ -470,7 +555,13 @@ export class FsRpcService {
     for (const [pathKey, ino] of this.pathToIno.entries()) {
       if (pathKey === normalized || pathKey.startsWith(normalized + "/")) {
         this.pathToIno.delete(pathKey);
-        this.inoToPath.delete(ino);
+        const paths = this.inoToPaths.get(ino);
+        if (paths) {
+          paths.delete(pathKey);
+          if (paths.size === 0) {
+            this.inoToPaths.delete(ino);
+          }
+        }
       }
     }
   }
@@ -487,10 +578,34 @@ export class FsRpcService {
       }
     }
 
+    for (const [pathKey, ino] of this.pathToIno.entries()) {
+      const overlapsDestination = pathKey === normalizedNew || pathKey.startsWith(normalizedNew + "/");
+      const isMovedSource = pathKey === normalizedOld || pathKey.startsWith(normalizedOld + "/");
+      if (!overlapsDestination || isMovedSource) {
+        continue;
+      }
+
+      this.pathToIno.delete(pathKey);
+      const paths = this.inoToPaths.get(ino);
+      if (paths) {
+        paths.delete(pathKey);
+        if (paths.size === 0) {
+          this.inoToPaths.delete(ino);
+        }
+      }
+    }
+
     for (const update of updates) {
       this.pathToIno.delete(update.oldPath);
       this.pathToIno.set(update.newPath, update.ino);
-      this.inoToPath.set(update.ino, update.newPath);
+
+      const paths = this.inoToPaths.get(update.ino);
+      if (paths) {
+        paths.delete(update.oldPath);
+        paths.add(update.newPath);
+      } else {
+        this.inoToPaths.set(update.ino, new Set([update.newPath]));
+      }
     }
 
     for (const handleEntry of this.handles.values()) {

@@ -11,18 +11,24 @@ const FuseOp = struct {
     pub const FORGET: u32 = 2;
     pub const GETATTR: u32 = 3;
     pub const SETATTR: u32 = 4;
+    pub const READLINK: u32 = 5;
+    pub const SYMLINK: u32 = 6;
     pub const MKDIR: u32 = 9;
     pub const UNLINK: u32 = 10;
     pub const RENAME: u32 = 12;
+    pub const LINK: u32 = 13;
     pub const OPEN: u32 = 14;
     pub const READ: u32 = 15;
     pub const WRITE: u32 = 16;
     pub const STATFS: u32 = 17;
     pub const RELEASE: u32 = 18;
+    pub const FSYNC: u32 = 20;
+    pub const FLUSH: u32 = 25;
     pub const INIT: u32 = 26;
     pub const OPENDIR: u32 = 27;
     pub const READDIR: u32 = 28;
     pub const RELEASEDIR: u32 = 29;
+    pub const ACCESS: u32 = 34;
     pub const CREATE: u32 = 35;
 };
 
@@ -177,6 +183,10 @@ const FuseRenameIn = struct {
     newdir: u64,
 };
 
+const FuseLinkIn = struct {
+    oldnodeid: u64,
+};
+
 const FuseSetattrIn = struct {
     valid: u32,
     padding: u32,
@@ -254,9 +264,12 @@ const SandboxFs = struct {
             FuseOp.LOOKUP => try self.handleLookup(header, payload),
             FuseOp.GETATTR => try self.handleGetattr(header),
             FuseOp.SETATTR => try self.handleSetattr(header, payload),
+            FuseOp.READLINK => try self.handleReadlink(header),
+            FuseOp.SYMLINK => try self.handleSymlink(header, payload),
             FuseOp.MKDIR => try self.handleMkdir(header, payload),
             FuseOp.UNLINK => try self.handleUnlink(header, payload),
             FuseOp.RENAME => try self.handleRename(header, payload),
+            FuseOp.LINK => try self.handleLink(header, payload),
             FuseOp.OPEN => try self.handleOpen(header, payload),
             FuseOp.OPENDIR => try self.handleOpendir(header),
             FuseOp.READDIR => try self.handleReaddir(header, payload),
@@ -265,7 +278,10 @@ const SandboxFs = struct {
             FuseOp.WRITE => try self.handleWrite(header, payload),
             FuseOp.CREATE => try self.handleCreate(header, payload),
             FuseOp.RELEASE => try self.handleRelease(header, payload),
+            FuseOp.FSYNC => try self.handleFsync(header),
             FuseOp.STATFS => try self.handleStatfs(header),
+            FuseOp.FLUSH => try self.handleFlush(header),
+            FuseOp.ACCESS => try self.handleAccess(header),
             FuseOp.FORGET => return,
             else => try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS),
         }
@@ -355,6 +371,27 @@ const SandboxFs = struct {
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
     }
 
+    fn handleReadlink(self: *SandboxFs, header: FuseInHeader) !void {
+        if (self.rpc == null) {
+            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
+            return;
+        }
+
+        var fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
+        var response = try self.rpc.?.request("readlink", &fields);
+        defer response.deinit();
+
+        if (response.err != 0) {
+            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
+            return;
+        }
+
+        const res_map = response.res orelse return error.InvalidResponse;
+        const target_val = cbor.getMapValue(res_map, "target") orelse return error.InvalidResponse;
+        const target = try expectText(target_val);
+        try sendResponse(self.fuse_fd, header.unique, 0, target);
+    }
+
     fn handleSetattr(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
         if (self.rpc == null) {
             try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
@@ -362,21 +399,18 @@ const SandboxFs = struct {
         }
 
         const setattr = try parseSetattr(payload);
-        if ((setattr.valid & FattrFlags.SIZE) == 0) {
-            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
-            return;
-        }
+        if ((setattr.valid & FattrFlags.SIZE) != 0) {
+            var fields = [_]fs_rpc.Field{
+                .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
+                .{ .name = "size", .value = .{ .UInt = setattr.size } },
+            };
+            var response = try self.rpc.?.request("truncate", &fields);
+            defer response.deinit();
 
-        var fields = [_]fs_rpc.Field{
-            .{ .name = "ino", .value = .{ .UInt = header.nodeid } },
-            .{ .name = "size", .value = .{ .UInt = setattr.size } },
-        };
-        var response = try self.rpc.?.request("truncate", &fields);
-        defer response.deinit();
-
-        if (response.err != 0) {
-            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
-            return;
+            if (response.err != 0) {
+                try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
+                return;
+            }
         }
 
         var attr_fields = [_]fs_rpc.Field{.{ .name = "ino", .value = .{ .UInt = header.nodeid } }};
@@ -396,6 +430,37 @@ const SandboxFs = struct {
 
         const out = buildAttrOut(attr, attr_ttl_ms);
         try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&out));
+    }
+
+    fn handleSymlink(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
+        if (self.rpc == null) {
+            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
+            return;
+        }
+
+        const name = parseName(payload);
+        if (name.len + 1 > payload.len) return error.InvalidRequest;
+        const target = parseName(payload[name.len + 1 ..]);
+
+        var fields = [_]fs_rpc.Field{
+            .{ .name = "parent_ino", .value = .{ .UInt = header.nodeid } },
+            .{ .name = "name", .value = .{ .Text = name } },
+            .{ .name = "target", .value = .{ .Text = target } },
+        };
+        var response = try self.rpc.?.request("symlink", &fields);
+        defer response.deinit();
+
+        if (response.err != 0) {
+            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
+            return;
+        }
+
+        const res_map = response.res orelse return error.InvalidResponse;
+        const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
+        const entry_map = try expectMap(entry_val);
+        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+
+        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
     }
 
     fn handleMkdir(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
@@ -478,6 +543,36 @@ const SandboxFs = struct {
         }
 
         try sendResponse(self.fuse_fd, header.unique, 0, &.{});
+    }
+
+    fn handleLink(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
+        if (self.rpc == null) {
+            try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
+            return;
+        }
+
+        const link = try parseLink(payload);
+        const name = parseName(payload[@sizeOf(FuseLinkIn)..]);
+
+        var fields = [_]fs_rpc.Field{
+            .{ .name = "old_ino", .value = .{ .UInt = link.oldnodeid } },
+            .{ .name = "new_parent_ino", .value = .{ .UInt = header.nodeid } },
+            .{ .name = "new_name", .value = .{ .Text = name } },
+        };
+        var response = try self.rpc.?.request("link", &fields);
+        defer response.deinit();
+
+        if (response.err != 0) {
+            try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
+            return;
+        }
+
+        const res_map = response.res orelse return error.InvalidResponse;
+        const entry_val = cbor.getMapValue(res_map, "entry") orelse return error.InvalidResponse;
+        const entry_map = try expectMap(entry_val);
+        const entry = try parseEntry(entry_map, DefaultTtls.attr_ms, DefaultTtls.entry_ms);
+
+        try sendResponse(self.fuse_fd, header.unique, 0, std.mem.asBytes(&entry.out));
     }
 
     fn handleOpen(self: *SandboxFs, header: FuseInHeader, payload: []const u8) !void {
@@ -718,6 +813,18 @@ const SandboxFs = struct {
             return;
         }
 
+        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
+    }
+
+    fn handleFsync(self: *SandboxFs, header: FuseInHeader) !void {
+        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
+    }
+
+    fn handleFlush(self: *SandboxFs, header: FuseInHeader) !void {
+        try sendResponse(self.fuse_fd, header.unique, 0, &.{});
+    }
+
+    fn handleAccess(self: *SandboxFs, header: FuseInHeader) !void {
         try sendResponse(self.fuse_fd, header.unique, 0, &.{});
     }
 
@@ -987,6 +1094,12 @@ fn parseRename(payload: []const u8) !FuseRenameIn {
     var offset: usize = 0;
     const newdir = try readU64(payload, &offset);
     return .{ .newdir = newdir };
+}
+
+fn parseLink(payload: []const u8) !FuseLinkIn {
+    var offset: usize = 0;
+    const oldnodeid = try readU64(payload, &offset);
+    return .{ .oldnodeid = oldnodeid };
 }
 
 fn parseSetattr(payload: []const u8) !FuseSetattrIn {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import os from "node:os";
 import test from "node:test";
 
 import { MemoryProvider } from "../src/vfs";
@@ -10,6 +11,8 @@ import {
   normalizeMountPath,
 } from "../src/vfs/mounts";
 
+const { errno: ERRNO } = os.constants;
+
 const isENOENT = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;
   return error.code === "ENOENT" || error.code === "ERRNO_2" || error.errno === 2;
@@ -18,6 +21,11 @@ const isENOENT = (err: unknown) => {
 const isEXDEV = (err: unknown) => {
   const error = err as NodeJS.ErrnoException;
   return error.code === "EXDEV" || error.code === "ERRNO_18" || error.errno === 18;
+};
+
+const isENOSYS = (err: unknown) => {
+  const error = err as NodeJS.ErrnoException;
+  return error.code === "ENOSYS" || error.errno === ERRNO.ENOSYS;
 };
 
 test("normalizeMountPath validates and normalizes", () => {
@@ -82,6 +90,28 @@ test("MountRouterProvider exposes virtual root without base mount", async () => 
   assert.ok(rootStats.isDirectory());
 
   await assert.rejects(() => router.open("/missing.txt", "r"), isENOENT);
+});
+
+test("MountRouterProvider link rejects cross-mount paths", async () => {
+  const router = new MountRouterProvider({ "/": new MemoryProvider(), "/app": new MemoryProvider() });
+
+  await assert.rejects(() => router.link("/origin.txt", "/app/linked.txt"), isEXDEV);
+});
+
+test("MountRouterProvider link delegates or reports ENOSYS", async () => {
+  const unsupportedRouter = new MountRouterProvider({ "/data": new MemoryProvider() });
+  await assert.rejects(() => unsupportedRouter.link("/data/a", "/data/b"), isENOSYS);
+
+  let seen: { existingPath: string; newPath: string } | null = null;
+  const supportedProvider = Object.assign(new MemoryProvider(), {
+    link: async (existingPath: string, newPath: string) => {
+      seen = { existingPath, newPath };
+    },
+  });
+  const supportedRouter = new MountRouterProvider({ "/data": supportedProvider });
+
+  await supportedRouter.link("/data/a", "/data/b");
+  assert.deepEqual(seen, { existingPath: "/a", newPath: "/b" });
 });
 
 test("MountRouterProvider resolves deep nested mounts and normalizes .. traversal", async () => {
