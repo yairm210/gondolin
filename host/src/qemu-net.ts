@@ -450,7 +450,7 @@ type HttpSession = {
 };
 
 class GuestTlsStream extends Duplex {
-  constructor(private readonly onEncryptedWrite: (chunk: Buffer) => void) {
+  constructor(private readonly onEncryptedWrite: (chunk: Buffer) => void | Promise<void>) {
     super();
   }
 
@@ -463,8 +463,10 @@ class GuestTlsStream extends Duplex {
   }
 
   _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
-    this.onEncryptedWrite(Buffer.from(chunk));
-    callback();
+    Promise.resolve(this.onEncryptedWrite(Buffer.from(chunk))).then(
+      () => callback(),
+      (err) => callback(err as Error)
+    );
   }
 }
 
@@ -694,6 +696,7 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly tlsContextCacheTtlMs: number;
   private readonly httpConcurrency: AsyncSemaphore;
   private readonly sharedDispatchers = new Map<string, SharedDispatcherEntry>();
+  private readonly flowResumeWaiters = new Map<string, Array<() => void>>();
 
   private readonly dnsMode: DnsMode;
   private readonly trustedDnsServers: string[];
@@ -878,6 +881,11 @@ export class QemuNetworkBackend extends EventEmitter {
 
     this.stack.on("network-activity", () => this.flush());
     this.stack.on("error", (err) => this.emit("error", err));
+    this.stack.on("tx-drop", (info: { priority: string; bytes: number; reason: string; evictedBytes?: number }) => {
+      if (!this.options.debug) return;
+      const evicted = typeof info.evictedBytes === "number" ? ` evicted=${info.evictedBytes}` : "";
+      this.emitDebug(`tx-drop priority=${info.priority} bytes=${info.bytes} reason=${info.reason}${evicted}`);
+    });
     if (this.options.debug) {
       this.icmpTimings.clear();
       this.icmpDebugBuffer = Buffer.alloc(0);
@@ -1225,6 +1233,8 @@ export class QemuNetworkBackend extends EventEmitter {
 
     session.pendingWrites = [];
     session.pendingWriteBytes = 0;
+    session.flowControlPaused = false;
+    this.resolveFlowResume(key);
 
     this.stack?.handleTcpError({ key });
     this.tcpSessions.delete(key);
@@ -1289,6 +1299,8 @@ export class QemuNetworkBackend extends EventEmitter {
       session.ws = undefined;
       session.pendingWrites = [];
       session.pendingWriteBytes = 0;
+      session.flowControlPaused = false;
+      this.resolveFlowResume(message.key);
       if (session.tls) {
         if (message.destroy) {
           session.tls.socket.destroy();
@@ -1311,17 +1323,41 @@ export class QemuNetworkBackend extends EventEmitter {
 
   private handleTcpPause(message: TcpPauseMessage) {
     const session = this.tcpSessions.get(message.key);
-    if (session && session.socket) {
-      session.flowControlPaused = true;
+    if (!session) return;
+    session.flowControlPaused = true;
+    if (session.socket) {
       session.socket.pause();
     }
   }
 
   private handleTcpResume(message: TcpResumeMessage) {
     const session = this.tcpSessions.get(message.key);
-    if (session && session.socket) {
-      session.flowControlPaused = false;
+    if (!session) return;
+    session.flowControlPaused = false;
+    if (session.socket) {
       session.socket.resume();
+    }
+    this.resolveFlowResume(message.key);
+  }
+
+  private waitForFlowResume(key: string): Promise<void> {
+    const session = this.tcpSessions.get(key);
+    if (!session || !session.flowControlPaused) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const waiters = this.flowResumeWaiters.get(key) ?? [];
+      waiters.push(resolve);
+      this.flowResumeWaiters.set(key, waiters);
+    });
+  }
+
+  private resolveFlowResume(key: string) {
+    const waiters = this.flowResumeWaiters.get(key);
+    if (!waiters) return;
+    this.flowResumeWaiters.delete(key);
+    for (const resolve of waiters) {
+      resolve();
     }
   }
 
@@ -1352,11 +1388,13 @@ export class QemuNetworkBackend extends EventEmitter {
 
     socket.on("close", () => {
       this.stack?.handleTcpClosed({ key });
+      this.resolveFlowResume(key);
       this.tcpSessions.delete(key);
     });
 
     socket.on("error", () => {
       this.stack?.handleTcpError({ key });
+      this.resolveFlowResume(key);
       this.tcpSessions.delete(key);
     });
   }
@@ -1364,9 +1402,10 @@ export class QemuNetworkBackend extends EventEmitter {
   private ensureTlsSession(key: string, session: TcpSession) {
     if (session.tls) return session.tls;
 
-    const stream = new GuestTlsStream((chunk) => {
+    const stream = new GuestTlsStream(async (chunk) => {
       this.stack?.handleTcpData({ key, data: chunk });
       this.flush();
+      await this.waitForFlowResume(key);
     });
 
     const tlsSocket = new tls.TLSSocket(stream, {
@@ -1398,6 +1437,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
     tlsSocket.on("close", () => {
       this.stack?.handleTcpClosed({ key });
+      this.resolveFlowResume(key);
       this.tcpSessions.delete(key);
     });
 
@@ -2239,6 +2279,9 @@ export class QemuNetworkBackend extends EventEmitter {
         return;
       }
 
+      const requestLabel = `${currentRequest.method} ${currentUrl.toString()}`;
+      const responseStart = Date.now();
+
       await this.ensureRequestAllowed(currentRequest);
       await this.ensureIpAllowed(currentUrl, protocol, port);
 
@@ -2253,13 +2296,22 @@ export class QemuNetworkBackend extends EventEmitter {
           })
         : null;
 
-      const response = await fetcher(currentUrl.toString(), {
-        method: currentRequest.method,
-        headers: currentRequest.headers,
-        body: currentRequest.body ? new Uint8Array(currentRequest.body) : undefined,
-        redirect: "manual",
-        ...(dispatcher ? { dispatcher } : {}),
-      });
+      let response: FetchResponse;
+      try {
+        response = await fetcher(currentUrl.toString(), {
+          method: currentRequest.method,
+          headers: currentRequest.headers,
+          body: currentRequest.body ? new Uint8Array(currentRequest.body) : undefined,
+          redirect: "manual",
+          ...(dispatcher ? { dispatcher } : {}),
+        });
+      } catch (err) {
+        if (this.options.debug) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.emitDebug(`http bridge fetch failed ${currentRequest.method} ${currentUrl.toString()} (${message})`);
+        }
+        throw err;
+      }
 
       const redirectUrl = getRedirectUrl(response, currentUrl);
         if (redirectUrl) {
@@ -2350,6 +2402,7 @@ export class QemuNetworkBackend extends EventEmitter {
 
         if (canStream && responseBodyStream) {
           const allowChunked = httpVersion === "HTTP/1.1";
+          let streamedBytes = 0;
 
           if (contentEncoding || !hasValidLength) {
             // When the upstream response was encoded (undici may have decoded it for us)
@@ -2367,7 +2420,7 @@ export class QemuNetworkBackend extends EventEmitter {
                 },
                 httpVersion
               );
-              await this.sendChunkedBody(responseBodyStream, write);
+              streamedBytes = await this.sendChunkedBody(responseBodyStream, write);
             } else {
               // HTTP/1.0 does not support Transfer-Encoding: chunked.
               delete responseHeaders["transfer-encoding"];
@@ -2380,7 +2433,7 @@ export class QemuNetworkBackend extends EventEmitter {
                 },
                 httpVersion
               );
-              await this.sendStreamBody(responseBodyStream, write);
+              streamedBytes = await this.sendStreamBody(responseBodyStream, write);
             }
           } else {
             responseHeaders["content-length"] = parsedLength!.toString();
@@ -2394,7 +2447,12 @@ export class QemuNetworkBackend extends EventEmitter {
               },
               httpVersion
             );
-            await this.sendStreamBody(responseBodyStream, write);
+            streamedBytes = await this.sendStreamBody(responseBodyStream, write);
+          }
+
+          if (this.options.debug) {
+            const elapsed = Date.now() - responseStart;
+            this.emitDebug(`http bridge body complete ${requestLabel} ${streamedBytes} bytes in ${elapsed}ms`);
           }
 
           return;
@@ -2446,6 +2504,10 @@ export class QemuNetworkBackend extends EventEmitter {
         }
 
         this.sendHttpResponse(write, hookResponse, httpVersion);
+        if (this.options.debug) {
+          const elapsed = Date.now() - responseStart;
+          this.emitDebug(`http bridge body complete ${requestLabel} ${hookResponse.body.length} bytes in ${elapsed}ms`);
+        }
         return;
     }
 
@@ -2711,6 +2773,7 @@ export class QemuNetworkBackend extends EventEmitter {
         // If the session was already aborted/removed, do not emit a second close.
         if (!this.tcpSessions.has(key)) return;
         this.stack?.handleTcpClosed({ key });
+        this.resolveFlowResume(key);
         this.tcpSessions.delete(key);
       }
     });
@@ -3014,13 +3077,15 @@ export class QemuNetworkBackend extends EventEmitter {
     }
   }
 
-  private async sendChunkedBody(body: WebReadableStream<Uint8Array>, write: (chunk: Buffer) => void) {
+  private async sendChunkedBody(body: WebReadableStream<Uint8Array>, write: (chunk: Buffer) => void): Promise<number> {
     const reader = body.getReader();
+    let total = 0;
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (!value || value.length === 0) continue;
+        total += value.length;
         const sizeLine = Buffer.from(`${value.length.toString(16)}\r\n`);
         write(sizeLine);
         write(Buffer.from(value));
@@ -3031,20 +3096,24 @@ export class QemuNetworkBackend extends EventEmitter {
     }
 
     write(Buffer.from("0\r\n\r\n"));
+    return total;
   }
 
-  private async sendStreamBody(body: WebReadableStream<Uint8Array>, write: (chunk: Buffer) => void) {
+  private async sendStreamBody(body: WebReadableStream<Uint8Array>, write: (chunk: Buffer) => void): Promise<number> {
     const reader = body.getReader();
+    let total = 0;
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (!value || value.length === 0) continue;
+        total += value.length;
         write(Buffer.from(value));
       }
     } finally {
       reader.releaseLock();
     }
+    return total;
   }
 
   private async bufferResponseBodyWithLimit(

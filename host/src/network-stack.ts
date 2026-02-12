@@ -152,6 +152,10 @@ type TcpSession = {
   vmAck: number;
   mySeq: number;
   myAck: number;
+  /** latest advertised guest receive window in `bytes` */
+  peerWindow: number;
+  /** queued host->guest tcp payload not yet emitted as segments */
+  pendingOutbound: Buffer;
   flowProtocol: TcpFlowProtocol | null;
   pendingData: Buffer;
   httpMethod?: string;
@@ -219,7 +223,9 @@ export class NetworkStack extends EventEmitter {
 
   private readonly TX_BUFFER_HIGH_WATER = 512 * 1024;
   private readonly TX_BUFFER_LOW_WATER = 128 * 1024;
-  private readonly txPaused = new Set<string>();
+  private readonly TCP_MAX_IN_FLIGHT_BYTES = 48 * 1024;
+  private readonly txQueuePaused = new Set<string>();
+  private readonly txFlowPaused = new Set<string>();
 
   constructor(options: NetworkStackOptions) {
     super();
@@ -242,7 +248,8 @@ export class NetworkStack extends EventEmitter {
     this.txQueueLow = [];
     this.txQueueSize = 0;
     this.txQueueHighSize = 0;
-    this.txPaused.clear();
+    this.txQueuePaused.clear();
+    this.txFlowPaused.clear();
   }
 
   hasPendingData() {
@@ -294,11 +301,13 @@ export class NetworkStack extends EventEmitter {
       }
     }
 
-    if (this.txQueueHighSize < this.TX_BUFFER_LOW_WATER && this.txPaused.size > 0) {
-      for (const key of this.txPaused) {
-        this.callbacks.onTcpResume({ key });
+    if (this.txQueueHighSize < this.TX_BUFFER_LOW_WATER && this.txQueuePaused.size > 0) {
+      for (const key of this.txQueuePaused) {
+        if (!this.txFlowPaused.has(key)) {
+          this.callbacks.onTcpResume({ key });
+        }
       }
-      this.txPaused.clear();
+      this.txQueuePaused.clear();
     }
 
     if (chunks.length === 1 && chunks[0].length === total) {
@@ -642,6 +651,7 @@ export class NetworkStack extends EventEmitter {
   private rejectTcpFlow(session: TcpSession, key: string, ack: number, reason: string) {
     this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, ack, 0x14);
     this.callbacks.onTcpClose({ key, destroy: true });
+    this.clearPauseState(key);
     this.natTable.delete(key);
     this.emit("tcp-deny", { key, reason });
   }
@@ -653,6 +663,7 @@ export class NetworkStack extends EventEmitter {
     const ack = segment.readUInt32BE(8);
     const offset = (segment[12] >> 4) * 4;
     const flags = segment[13];
+    const window = segment.readUInt16BE(14);
     const payload = segment.subarray(offset);
 
     const SYN = (flags & 0x02) !== 0;
@@ -665,6 +676,7 @@ export class NetworkStack extends EventEmitter {
     if (RST) {
       if (session) {
         this.callbacks.onTcpClose({ key, destroy: true });
+        this.clearPauseState(key);
         this.natTable.delete(key);
       }
       return;
@@ -681,6 +693,8 @@ export class NetworkStack extends EventEmitter {
         vmAck: ack,
         mySeq: Math.floor(Math.random() * 0x0fffffff),
         myAck: seq + 1,
+        peerWindow: segment.readUInt16BE(14),
+        pendingOutbound: Buffer.alloc(0),
         flowProtocol: null,
         pendingData: Buffer.alloc(0),
       };
@@ -701,6 +715,21 @@ export class NetworkStack extends EventEmitter {
         this.sendTCP(srcIP, srcPort, dstIP, dstPort, 0, seq + (payload.length || 1), 0x04);
       }
       return;
+    }
+
+    const prevPeerWindow = session.peerWindow;
+    session.peerWindow = window;
+
+    let shouldDrainOutbound = false;
+    if (ack > session.vmAck && ack <= session.mySeq) {
+      session.vmAck = ack;
+      shouldDrainOutbound = true;
+    }
+    if (session.pendingOutbound.length > 0 && window > prevPeerWindow) {
+      shouldDrainOutbound = true;
+    }
+    if (shouldDrainOutbound) {
+      this.drainOutboundTcp(key, session);
     }
 
     if (payload.length > 0) {
@@ -766,6 +795,7 @@ export class NetworkStack extends EventEmitter {
       session.myAck++;
       this.sendTCP(session.srcIP, session.srcPort, session.dstIP, session.dstPort, session.mySeq, session.myAck, 0x10);
       if (session.state === "CLOSED_BY_REMOTE" || session.state === "FIN_WAIT") {
+        this.clearPauseState(key);
         this.natTable.delete(key);
       } else {
         session.state = "FIN_SENT";
@@ -1031,6 +1061,83 @@ export class NetworkStack extends EventEmitter {
     this.sendIP(withChecksum, IP_PROTO_UDP, dstIPBuf, srcIPBuf);
   }
 
+  private clearPauseState(key: string) {
+    this.txQueuePaused.delete(key);
+    this.txFlowPaused.delete(key);
+  }
+
+  private pauseFlow(key: string) {
+    if (this.txFlowPaused.has(key)) {
+      return;
+    }
+    this.txFlowPaused.add(key);
+    this.callbacks.onTcpPause({ key });
+  }
+
+  private maybeResumeFlow(key: string) {
+    if (!this.txFlowPaused.has(key)) {
+      return;
+    }
+    const session = this.natTable.get(key);
+    if (!session || session.pendingOutbound.length === 0) {
+      this.txFlowPaused.delete(key);
+      if (!this.txQueuePaused.has(key)) {
+        this.callbacks.onTcpResume({ key });
+      }
+      return;
+    }
+
+    const inFlight = Math.max(0, session.mySeq - session.vmAck);
+    const maxInFlight = Math.max(0, Math.min(session.peerWindow, this.TCP_MAX_IN_FLIGHT_BYTES));
+    if (inFlight < maxInFlight) {
+      this.txFlowPaused.delete(key);
+      if (!this.txQueuePaused.has(key)) {
+        this.callbacks.onTcpResume({ key });
+      }
+    }
+  }
+
+  private drainOutboundTcp(key: string, session: TcpSession) {
+    if (session.pendingOutbound.length === 0) {
+      this.maybeResumeFlow(key);
+      return;
+    }
+
+    const MSS = 1460;
+    let inFlight = Math.max(0, session.mySeq - session.vmAck);
+    const maxInFlight = Math.max(0, Math.min(session.peerWindow, this.TCP_MAX_IN_FLIGHT_BYTES));
+
+    while (session.pendingOutbound.length > 0 && inFlight < maxInFlight) {
+      const allowance = maxInFlight - inFlight;
+      const chunkSize = Math.min(MSS, session.pendingOutbound.length, allowance);
+      if (chunkSize <= 0) {
+        break;
+      }
+
+      const chunk = session.pendingOutbound.subarray(0, chunkSize);
+      session.pendingOutbound = session.pendingOutbound.subarray(chunkSize);
+      const flags = session.pendingOutbound.length === 0 ? 0x18 : 0x10;
+      this.sendTCP(
+        session.srcIP,
+        session.srcPort,
+        session.dstIP,
+        session.dstPort,
+        session.mySeq,
+        session.myAck,
+        flags,
+        chunk
+      );
+      session.mySeq += chunk.length;
+      inFlight += chunk.length;
+    }
+
+    if (session.pendingOutbound.length > 0) {
+      this.pauseFlow(key);
+    } else {
+      this.maybeResumeFlow(key);
+    }
+  }
+
   handleTcpConnected(message: { key: string }) {
     const session = this.natTable.get(message.key);
     if (!session) return;
@@ -1053,31 +1160,13 @@ export class NetworkStack extends EventEmitter {
     if (!session) return;
 
     const payload = Buffer.from(message.data);
-    const MSS = 1460;
-
-    let offset = 0;
-    while (offset < payload.length) {
-      const chunkSize = Math.min(MSS, payload.length - offset);
-      const chunk = payload.subarray(offset, offset + chunkSize);
-      const isLast = offset + chunkSize >= payload.length;
-
-      const flags = isLast ? 0x18 : 0x10;
-      this.sendTCP(
-        session.srcIP,
-        session.srcPort,
-        session.dstIP,
-        session.dstPort,
-        session.mySeq,
-        session.myAck,
-        flags,
-        chunk
-      );
-      session.mySeq += chunk.length;
-      offset += chunkSize;
+    if (payload.length > 0) {
+      session.pendingOutbound = Buffer.concat([session.pendingOutbound, payload]);
+      this.drainOutboundTcp(message.key, session);
     }
 
-    if (this.txQueueHighSize > this.TX_BUFFER_HIGH_WATER && !this.txPaused.has(message.key)) {
-      this.txPaused.add(message.key);
+    if (this.txQueueHighSize > this.TX_BUFFER_HIGH_WATER && !this.txQueuePaused.has(message.key)) {
+      this.txQueuePaused.add(message.key);
       this.callbacks.onTcpPause({ key: message.key });
     }
   }
@@ -1112,6 +1201,7 @@ export class NetworkStack extends EventEmitter {
       session.myAck,
       0x04
     );
+    this.clearPauseState(message.key);
     this.natTable.delete(message.key);
   }
 

@@ -872,9 +872,31 @@ test("network-stack: TCP flow control pauses when tx buffer grows and resumes wh
   assert.equal(pauses.length, 1);
   assert.equal(pauses[0].key, key);
 
-  // Drain all queued traffic. Resume should fire once we cross the low watermark.
+  // Draining host->guest queue alone is not enough to resume: guest ACKs must advance
+  // to open the in-flight window and unblock pending outbound bytes.
   drainAllQemuTx(stack);
-  // Note: resume happens inside readFromNetwork while draining.
+  assert.equal(resumes.length, 0);
+
+  // Drive ACK progress until queued outbound bytes are flushed.
+  for (let i = 0; i < 32; i++) {
+    const session = (stack as any).natTable.get(key);
+    if (!session) break;
+    if (session.pendingOutbound.length === 0) break;
+
+    stack.handleTCP(
+      buildTcpSegment({
+        srcPort: 40006,
+        dstPort: 80,
+        seq: session.vmSeq,
+        ack: session.mySeq,
+        flags: 0x10,
+      }),
+      srcIP,
+      dstIP
+    );
+    drainAllQemuTx(stack);
+  }
+
   assert.equal(resumes.length, 1);
   assert.equal(resumes[0].key, key);
 });

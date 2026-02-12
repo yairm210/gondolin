@@ -283,7 +283,10 @@ const SandboxFs = struct {
             FuseOp.FLUSH => try self.handleFlush(header),
             FuseOp.ACCESS => try self.handleAccess(header),
             FuseOp.FORGET => return,
-            else => try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS),
+            else => {
+                log.warn("unsupported fuse opcode {}", .{header.opcode});
+                try sendError(self.fuse_fd, header.unique, std.os.linux.E.NOSYS);
+            },
         }
     }
 
