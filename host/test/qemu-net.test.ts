@@ -2150,6 +2150,84 @@ test("qemu-net: ssh flows with agent use proxy path", () => {
   assert.equal(usedSocket, 0);
 });
 
+test("qemu-net: ssh execPolicy can deny exec", async () => {
+  let seen: any = null;
+
+  const backend = makeBackend({
+    dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+    ssh: {
+      allowedHosts: ["github.com"],
+      agent: "/tmp/fake-ssh-agent.sock",
+      hostVerifier: () => true,
+      execPolicy: (req) => {
+        seen = req;
+        return { allow: false, exitCode: 42, message: "denied" };
+      },
+    },
+  });
+
+  const session: any = {
+    socket: null,
+    srcIP: "192.168.127.3",
+    srcPort: 50006,
+    dstIP: "198.19.0.12",
+    dstPort: 22,
+    connectIP: "github.com",
+    syntheticHostname: "github.com",
+    sshCredential: null,
+    flowControlPaused: false,
+    protocol: "ssh",
+    connected: false,
+    pendingWrites: [],
+    pendingWriteBytes: 0,
+  };
+
+  const proxy: any = {
+    upstreams: new Set(),
+  };
+
+  const stderr: string[] = [];
+  class FakeChannel extends EventEmitter {
+    stderr = {
+      write: (data: any) => {
+        stderr.push(String(data));
+      },
+    };
+    exitCode: number | null = null;
+    closed = false;
+    exit(code: number) {
+      this.exitCode = code;
+    }
+    close() {
+      this.closed = true;
+      this.emit("close");
+    }
+  }
+
+  const ch: any = new FakeChannel();
+
+  await (backend as any).bridgeSshExecChannel({
+    key: "tcp-exec-policy",
+    session,
+    proxy,
+    guestChannel: ch,
+    command: "git-upload-pack 'my-org/my-repo.git'",
+    guestUsername: "git",
+  });
+
+  assert.ok(seen);
+  assert.equal(seen.hostname, "github.com");
+  assert.equal(seen.port, 22);
+  assert.equal(seen.guestUsername, "git");
+  assert.equal(seen.command, "git-upload-pack 'my-org/my-repo.git'");
+  assert.deepEqual(seen.src, { ip: "192.168.127.3", port: 50006 });
+
+  assert.equal(ch.exitCode, 42);
+  assert.equal(ch.closed, true);
+  assert.equal(proxy.upstreams.size, 0);
+  assert.equal(stderr.join(""), "denied\n");
+});
+
 test("qemu-net: shared checked dispatcher is reused per origin", () => {
   const backend = makeBackend({
     httpHooks: {

@@ -183,3 +183,32 @@ const vm = await VM.create({
 
 // Now commands like `git clone git@github.com:org/repo.git` can work inside the guest
 ```
+
+### Exec Policy
+
+SSH egress supports an `execPolicy` hook that lets the host allow/deny each SSH
+`exec` request before it is proxied upstream.
+
+For git-over-SSH, you can parse the `exec` command and restrict access to a
+specific set of repos:
+
+```ts
+import { VM, getInfoFromSshExecRequest } from "@earendil-works/gondolin";
+
+const allowedRepos = new Set(["my-org/repo-a.git", "my-org/repo-b.git"]);
+
+const vm = await VM.create({
+  dns: { mode: "synthetic", syntheticHostMapping: "per-host" },
+  ssh: {
+    allowedHosts: ["github.com"],
+    agent: process.env.SSH_AUTH_SOCK,
+    execPolicy: (req) => {
+      const git = getInfoFromSshExecRequest(req);
+      if (!git) return { allow: false, message: "non-git ssh denied" };
+      if (!allowedRepos.has(git.repo)) return { allow: false, message: "repo not allowed" };
+      if (git.service === "git-receive-pack") return { allow: false, message: "push disabled" };
+      return { allow: true };
+    },
+  },
+});
+```

@@ -997,6 +997,36 @@ export type SshCredential = {
   passphrase?: string | Buffer;
 };
 
+export type SshExecRequest = {
+  /** target hostname derived from synthetic dns mapping */
+  hostname: string;
+  /** target port */
+  port: number;
+
+  /** ssh username the guest authenticated as */
+  guestUsername: string;
+
+  /** raw ssh exec command */
+  command: string;
+
+  /** source guest flow attribution */
+  src: { ip: string; port: number };
+};
+
+export type SshExecDecision =
+  | { allow: true }
+  | {
+      allow: false;
+      /** process exit code (default: 1) */
+      exitCode?: number;
+      /** message written to the guest channel stderr (trailing newline implied) */
+      message?: string;
+    };
+
+export type SshExecPolicy = (request: SshExecRequest) =>
+  | SshExecDecision
+  | Promise<SshExecDecision>;
+
 export type SshOptions = {
   /** allowed ssh host patterns (optionally with ":PORT" suffix to allow non-standard ports) */
   allowedHosts: string[];
@@ -1006,6 +1036,9 @@ export type SshOptions = {
   agent?: string;
   /** OpenSSH known_hosts file path(s) used for default host key verification when `hostVerifier` is not set */
   knownHostsFile?: string | string[];
+
+  /** allow/deny callback for guest ssh exec requests */
+  execPolicy?: SshExecPolicy;
 
   /** max concurrent upstream ssh connections per guest tcp flow */
   maxUpstreamConnectionsPerTcpSession?: number;
@@ -1174,6 +1207,7 @@ export class QemuNetworkBackend extends EventEmitter {
   private readonly sshAgent: string | null;
   private sshHostKey: string | null;
   private readonly sshHostVerifier: ((hostname: string, key: Buffer, port: number) => boolean) | null;
+  private readonly sshExecPolicy: SshExecPolicy | null;
   private readonly sshMaxUpstreamConnectionsPerTcpSession: number;
   private readonly sshMaxUpstreamConnectionsTotal: number;
   private readonly sshUpstreamReadyTimeoutMs: number;
@@ -1227,6 +1261,7 @@ export class QemuNetworkBackend extends EventEmitter {
     this.sshSniffPortsSet = new Set(this.sshSniffPorts);
     this.sshCredentials = normalizeSshCredentials(options.ssh?.credentials);
     this.sshAgent = options.ssh?.agent ?? null;
+    this.sshExecPolicy = options.ssh?.execPolicy ?? null;
     this.sshHostKey =
       typeof options.ssh?.hostKey === "string"
         ? options.ssh.hostKey
@@ -2218,6 +2253,41 @@ export class QemuNetworkBackend extends EventEmitter {
     }
     if (!credential && !this.sshAgent) {
       throw new Error("missing ssh proxy credential/agent");
+    }
+
+    if (this.sshExecPolicy) {
+      const decision = await this.sshExecPolicy({
+        hostname,
+        port: session.dstPort,
+        guestUsername,
+        command,
+        src: { ip: session.srcIP, port: session.srcPort },
+      });
+
+      if (!decision.allow) {
+        const exitCode = decision.exitCode ?? 1;
+        if (decision.message) {
+          try {
+            guestChannel.stderr.write(`${decision.message}\n`);
+          } catch {
+            // ignore
+          }
+        }
+        try {
+          guestChannel.exit(exitCode);
+        } catch {
+          // ignore
+        }
+        try {
+          guestChannel.close();
+        } catch {
+          // ignore
+        }
+        if (this.options.debug) {
+          this.emitDebug(`ssh proxy exec denied ${hostname}:${session.dstPort} ${JSON.stringify(command)}`);
+        }
+        return;
+      }
     }
 
     if (proxy.upstreams.size >= this.sshMaxUpstreamConnectionsPerTcpSession) {

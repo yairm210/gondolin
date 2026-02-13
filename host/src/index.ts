@@ -89,12 +89,18 @@ export type {
   SyntheticDnsHostMappingMode,
   SshOptions,
   SshCredential,
+  SshExecRequest,
+  SshExecDecision,
+  SshExecPolicy,
   HttpIpAllowInfo,
   HttpHooks,
   HttpHookRequest,
   HttpFetch,
 } from "./qemu-net";
 export { HttpRequestBlockedError } from "./qemu-net";
+
+// SSH helpers
+export { getInfoFromSshExecRequest, type GitSshExecInfo } from "./ssh-exec";
 
 // Debug helpers
 export {

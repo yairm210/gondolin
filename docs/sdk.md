@@ -453,6 +453,9 @@ const vm = await VM.create({
     // Verify upstream host keys (recommended)
     knownHostsFile: path.join(os.homedir(), ".ssh", "known_hosts"),
 
+    // Optional: allow/deny individual ssh exec requests (useful for git repo filtering)
+    // execPolicy: (req) => ({ allow: true }),
+
     // Optional safety knobs:
     // maxUpstreamConnectionsPerTcpSession: 4,
     // maxUpstreamConnectionsTotal: 64,
